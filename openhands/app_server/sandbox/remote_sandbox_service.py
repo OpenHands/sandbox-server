@@ -13,7 +13,7 @@ import httpx
 from fastapi import Request
 from pydantic import Field
 from sqlalchemy import String, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
 from openhands.agent_server.models import (
@@ -122,6 +122,7 @@ class RemoteSandboxService(SandboxService):
     user_context: UserContext
     httpx_client: httpx.AsyncClient
     db_session: AsyncSession
+    async_session_maker: async_sessionmaker[AsyncSession]
 
     async def _send_runtime_api_request(
         self, method: str, path: str, **kwargs: Any
@@ -235,12 +236,31 @@ class RemoteSandboxService(SandboxService):
             query = query.where(StoredRemoteSandbox.created_by_user_id == user_id)
         return query
 
+    async def _isolated_read_one(self, stmt: Any) -> StoredRemoteSandbox | None:
+        """Run a scalar read without touching the request-scoped transaction."""
+        async with self.async_session_maker() as read_session:
+            result = await read_session.execute(stmt)
+            return result.scalar_one_or_none()
+
+    async def _isolated_read_all(self, stmt: Any) -> list[StoredRemoteSandbox]:
+        """Materialize scalar rows in a short-lived read-only session."""
+        async with self.async_session_maker() as read_session:
+            result = await read_session.execute(stmt)
+            return list(result.scalars().all())
+
     async def _get_stored_sandbox(self, sandbox_id: str) -> StoredRemoteSandbox | None:
         stmt = await self._secure_select()
         stmt = stmt.where(StoredRemoteSandbox.id == sandbox_id)
         result = await self.db_session.execute(stmt)
         stored_sandbox = result.scalar_one_or_none()
         return stored_sandbox
+
+    async def _get_stored_sandbox_for_read(
+        self, sandbox_id: str
+    ) -> StoredRemoteSandbox | None:
+        stmt = await self._secure_select()
+        stmt = stmt.where(StoredRemoteSandbox.id == sandbox_id)
+        return await self._isolated_read_one(stmt)
 
     async def _get_runtime(self, sandbox_id: str) -> dict[str, Any]:
         response = await self._send_runtime_api_request(
@@ -328,8 +348,7 @@ class RemoteSandboxService(SandboxService):
         # Apply limit and get one extra to check if there are more results
         stmt = stmt.limit(limit + 1).order_by(StoredRemoteSandbox.created_at.desc())
 
-        result = await self.db_session.execute(stmt)
-        stored_sandboxes = result.scalars().all()
+        stored_sandboxes = await self._isolated_read_all(stmt)
 
         # Check if there are more results
         has_more = len(stored_sandboxes) > limit
@@ -355,7 +374,7 @@ class RemoteSandboxService(SandboxService):
 
     async def get_sandbox(self, sandbox_id: str) -> SandboxInfo | None:
         """Get a single sandbox by checking its corresponding runtime."""
-        stored_sandbox = await self._get_stored_sandbox(sandbox_id)
+        stored_sandbox = await self._get_stored_sandbox_for_read(sandbox_id)
         if stored_sandbox is None:
             return None
 
@@ -379,8 +398,7 @@ class RemoteSandboxService(SandboxService):
         stmt = stmt.where(
             StoredRemoteSandbox.session_api_key_hash == session_api_key_hash
         )
-        result = await self.db_session.execute(stmt)
-        stored_sandbox = result.scalar_one_or_none()
+        stored_sandbox = await self._isolated_read_one(stmt)
 
         if stored_sandbox is None:
             return None
@@ -415,8 +433,7 @@ class RemoteSandboxService(SandboxService):
         query = query.filter(StoredRemoteSandbox.id.in_(running_session_ids)).order_by(
             StoredRemoteSandbox.created_at.asc()
         )
-        result = await self.db_session.execute(query)
-        return list(result.scalars().all())
+        return await self._isolated_read_all(query)
 
     async def get_sandbox_record_by_session_api_key(
         self, session_api_key: str
@@ -830,9 +847,9 @@ class RemoteSandboxService(SandboxService):
             return []
         query = await self._secure_select()
         query = query.filter(StoredRemoteSandbox.id.in_(sandbox_ids))
-        stored_remote_sandboxes = await self.db_session.execute(query)
+        stored_remote_sandboxes = await self._isolated_read_all(query)
         stored_remote_sandboxes_by_id = {
-            stored_remote_sandbox[0].id: stored_remote_sandbox[0]
+            stored_remote_sandbox.id: stored_remote_sandbox
             for stored_remote_sandbox in stored_remote_sandboxes
         }
 
@@ -1117,6 +1134,7 @@ class RemoteSandboxServiceInjector(SandboxServiceInjector):
         # If no public facing web url is defined, poll for changes as callbacks will be unavailable.
         # This is primarily used for local development rather than production
         config = get_global_config()
+        async_session_maker = await config.db_session.get_async_session_maker()
         web_url = config.web_url
         if web_url is None or 'localhost' in web_url:
             global polling_task
@@ -1146,4 +1164,5 @@ class RemoteSandboxServiceInjector(SandboxServiceInjector):
                 user_context=user_context,
                 httpx_client=httpx_client,
                 db_session=db_session,
+                async_session_maker=async_session_maker,
             )
