@@ -10,8 +10,13 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
+from openhands.agent_server.mcp_router import (
+    MCPTestRequest,
+    MCPTestSuccess,
+    _probe_mcp_server,
+)
 from openhands.analytics import get_analytics_service
 from openhands.app_server.integrations.provider import (
     PROVIDER_TOKEN_TYPE,
@@ -97,6 +102,26 @@ router = APIRouter(
     tags=['Settings'],
     dependencies=get_dependencies(),
 )
+
+_MCP_SETTINGS_KEY_PATTERN = r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+MCPSettingsKey = Annotated[
+    str,
+    Path(min_length=1, max_length=128, pattern=_MCP_SETTINGS_KEY_PATTERN),
+]
+
+
+class StoredMCPProbeRequest(BaseModel):
+    """Bounded options for testing one already-stored MCP server."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    timeout: float = Field(default=15.0, gt=0, le=30)
+
+
+class StoredMCPProbeResponse(BaseModel):
+    """Sanitized connectivity verdict for a stored MCP server."""
+
+    ok: bool
 
 
 def _post_merge_llm_fixups(settings: Settings) -> None:
@@ -352,6 +377,62 @@ async def load_settings_schema() -> dict[str, Any]:
 async def load_conversation_settings_schema() -> dict[str, Any]:
     """Load the schema for conversations"""
     return ConversationSettings.export_schema().model_dump(mode='json')
+
+
+@router.post(
+    '/mcp/{settings_key}/test',
+    response_model=StoredMCPProbeResponse,
+)
+async def test_stored_mcp_server(
+    settings_key: MCPSettingsKey,
+    request: StoredMCPProbeRequest,
+    settings: Settings | None = Depends(get_user_settings),
+) -> StoredMCPProbeResponse:
+    """Test a user's stored MCP server without returning its config or errors.
+
+    The server configuration is resolved from authenticated user settings and
+    stays inside the app server. The detailed MCP result is deliberately reduced
+    to a boolean so credentials, provider messages, tools, and stack traces never
+    cross this API boundary.
+    """
+    if settings is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='MCP server was not found',
+        )
+    server = settings.agent_settings.mcp_config.get(settings_key)
+    if server is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='MCP server was not found',
+        )
+
+    server_data = server.model_dump(
+        mode='json',
+        context={'expose_secrets': 'plaintext'},
+        exclude_none=True,
+        exclude_defaults=True,
+    )
+    probe_request = MCPTestRequest(
+        name=settings_key,
+        server=server_data,
+        timeout=request.timeout,
+    )
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            _probe_mcp_server,
+            probe_request,
+            None,
+        )
+    except Exception:
+        logger.warning('Stored MCP validation failed unexpectedly')
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='MCP validation is temporarily unavailable',
+        ) from None
+    return StoredMCPProbeResponse(ok=isinstance(result, MCPTestSuccess))
 
 
 async def invalidate_legacy_secrets_store(
