@@ -21,11 +21,14 @@ class BitbucketDCReposMixin(BitbucketDCMixinBase):
         order: str,
         public: bool,
         app_mode: AppMode,
+        page: int = 1,
     ) -> list[Repository]:
         """Search for repositories."""
         repositories = []
 
         if public:
+            if page != 1:
+                return []
             try:
                 parsed_url = urlparse(query)
                 path_segments = [
@@ -80,6 +83,8 @@ class BitbucketDCReposMixin(BitbucketDCMixinBase):
                     if repo_query.lower() in r.get('slug', '').lower()
                     or repo_query.lower() in r.get('name', '').lower()
                 ]
+            start = (page - 1) * per_page
+            raw_repos = raw_repos[start : start + per_page]
             return [await self._parse_repository(repo) for repo in raw_repos]
 
         # No '/' in query, search across all projects
@@ -87,7 +92,7 @@ class BitbucketDCReposMixin(BitbucketDCMixinBase):
         for project_key in all_projects:
             try:
                 repos = await self.get_paginated_repos(
-                    1, per_page, sort, project_key, query
+                    page, per_page, sort, project_key, query
                 )
                 repositories.extend(repos)
             except Exception:

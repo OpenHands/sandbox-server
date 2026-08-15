@@ -20,7 +20,6 @@ from openhands.app_server.git.git_models import (
 )
 from openhands.app_server.integrations.provider import ProviderHandler
 from openhands.app_server.integrations.service_types import (
-    Branch,
     ProviderType,
     Repository,
     SuggestedTask,
@@ -44,6 +43,19 @@ router = APIRouter(
     dependencies=get_dependencies(),
 )
 user_context_dependency = depends_user_context()
+
+
+def _provider_page_number(page_id: str | None) -> int:
+    """Decode a provider page token, rejecting values this API never emits."""
+    if page_id is None:
+        return 1
+    page = decode_page_id(page_id)
+    if page is None or page <= 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Invalid page_id.',
+        )
+    return page
 
 
 @router.get('/installations/search')
@@ -138,6 +150,11 @@ async def search_repositories(
             status_code=status.HTTP_403_FORBIDDEN,  # 403 not 401 to avoid frontend logout
             detail='Git provider token required (such as GitHub).',
         )
+    if provider not in provider_tokens:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='Requested Git provider is not connected.',
+        )
 
     user_id = await user_context.get_user_id()
     # Cast to the expected type since we validated provider_tokens exists
@@ -147,10 +164,7 @@ async def search_repositories(
         external_auth_id=user_id,
     )
 
-    page = 1
-    decoded_page_id = decode_page_id(page_id)
-    if decoded_page_id is not None:
-        page = decoded_page_id
+    page = _provider_page_number(page_id)
 
     # If query is provided, use search; otherwise get user's repositories
     if query:
@@ -164,11 +178,17 @@ async def search_repositories(
         repos: list[Repository] = await client.search_repositories(
             selected_provider=provider,
             query=query,
-            per_page=limit + 1,
+            per_page=limit,
             sort=search_sort,
             order=order,
             app_mode=get_global_config().app_mode,
+            page=page,
         )
+        # A limit+1 look-ahead changes the provider's numbered page width and
+        # drops that boundary item when page+1 is requested. A full page uses
+        # an optimistic token; the harmless terminal page may therefore be empty.
+        has_next_page = len(repos) >= limit
+        repos = repos[:limit]
     else:
         if sort_order:
             # TODO: This is a temporary state until we refactor the underlying API.
@@ -188,11 +208,11 @@ async def search_repositories(
             per_page=limit + 1,
             installation_id=installation_id,
         )
+        has_next_page = len(repos) > limit
+        if has_next_page:
+            repos = repos[:-1]
 
-    next_page_id = None
-    if len(repos) > limit:
-        repos = repos[:-1]
-        next_page_id = encode_page_id(page + 1)
+    next_page_id = encode_page_id(page + 1) if has_next_page else None
 
     return RepositoryPage(items=repos, next_page_id=next_page_id)
 
@@ -229,6 +249,11 @@ async def search_branches(
             status_code=status.HTTP_403_FORBIDDEN,  # 403 not 401 to avoid frontend logout
             detail='Git provider token required (such as GitHub).',
         )
+    if provider not in provider_tokens:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='Requested Git provider is not connected.',
+        )
 
     user_id = await user_context.get_user_id()
     # Cast to the expected type since we validated provider_tokens exists
@@ -238,41 +263,32 @@ async def search_branches(
         external_auth_id=user_id,
     )
 
-    page = 1
-    decoded_page_id = decode_page_id(page_id)
-    if decoded_page_id is not None:
-        page = decoded_page_id
+    page = _provider_page_number(page_id)
 
-    if query:
-        if page != 1:
-            # TODO(#13883): Support pagination for branch search after refactoring.
-            # The search_branches method does not support paging in the same way as
-            # get_branches - those should be merged into a single paginated method
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail='Pagination not yet supported for branch search queries. Use empty query to list all branches with pagination.',
-            )
-        # Get search results - we'll handle pagination ourselves
-        branches: list[Branch] = await client.search_branches(
-            selected_provider=provider,
-            repository=repository,
-            query=query,
-            per_page=limit + 1,
-        )
-    else:
+    try:
         current_page = await client.get_branches(
             repository=repository,
             specified_provider=provider,
             page=page,
-            per_page=limit + 1,
+            per_page=limit,
+            raise_on_error=True,
         )
-        branches = current_page.branches
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail='Git branch search is temporarily unavailable.',
+        ) from None
+    branches = current_page.branches
+    if query:
+        normalized_query = query.casefold()
+        branches = [
+            branch
+            for branch in branches
+            if normalized_query in branch.name.casefold()
+            or branch.commit_sha.casefold().startswith(normalized_query)
+        ]
 
-    next_page_id = None
-    if len(branches) > limit:
-        branches = branches[:-1]
-        next_page_id = encode_page_id(page + 1)
-
+    next_page_id = encode_page_id(page + 1) if current_page.has_next_page else None
     return BranchPage(items=branches, next_page_id=next_page_id)
 
 
