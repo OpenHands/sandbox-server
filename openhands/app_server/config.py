@@ -266,6 +266,12 @@ def config_from_env() -> AppServerConfig:
     from openhands.app_server.sandbox.docker_sandbox_spec_service import (
         DockerSandboxSpecServiceInjector,
     )
+    from openhands.app_server.sandbox.kubernetes_sandbox_service import (
+        KubernetesSandboxServiceInjector,
+    )
+    from openhands.app_server.sandbox.kubernetes_sandbox_spec_service import (
+        KubernetesSandboxSpecServiceInjector,
+    )
     from openhands.app_server.sandbox.process_sandbox_service import (
         ProcessSandboxServiceInjector,
     )
@@ -336,6 +342,8 @@ def config_from_env() -> AppServerConfig:
                 api_key=os.environ['SANDBOX_API_KEY'],
                 api_url=os.environ['SANDBOX_REMOTE_RUNTIME_API_URL'],
             )
+        elif os.getenv('RUNTIME') in ('kubernetes', 'k8s'):
+            config.sandbox = KubernetesSandboxServiceInjector()
         elif os.getenv('RUNTIME') in ('local', 'process'):
             config.sandbox = ProcessSandboxServiceInjector()
         else:
@@ -388,6 +396,8 @@ def config_from_env() -> AppServerConfig:
     if config.sandbox_spec is None:
         if os.getenv('RUNTIME') == 'remote':
             config.sandbox_spec = RemoteSandboxSpecServiceInjector()
+        elif os.getenv('RUNTIME') in ('kubernetes', 'k8s'):
+            config.sandbox_spec = KubernetesSandboxSpecServiceInjector()
         elif os.getenv('RUNTIME') in ('local', 'process'):
             config.sandbox_spec = ProcessSandboxSpecServiceInjector()
         else:

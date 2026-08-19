@@ -10,6 +10,7 @@ Since agents can do things that may harm your system, they are typically run ins
 
 - **SandboxService**: Abstract service for sandbox lifecycle management
 - **DockerSandboxService**: Docker-based sandbox implementation
+- **KubernetesSandboxService**: Kubernetes implementation backed by kubernetes-sigs/agent-sandbox (see `deploy/kubernetes/`)
 - **SandboxSpecService**: Manages sandbox specifications and templates
 - **SandboxRouter**: FastAPI router for sandbox endpoints
 
@@ -17,5 +18,5 @@ Since agents can do things that may harm your system, they are typically run ins
 
 - Secure containerized execution environments
 - Sandbox lifecycle management (create, start, stop, destroy)
-- Multiple sandbox backend support (Docker, Remote, Local)
+- Multiple sandbox backend support (Docker, Kubernetes, Remote, Local)
 - User-scoped sandbox access control
