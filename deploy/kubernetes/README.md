@@ -41,7 +41,7 @@ Everything else has a default; override through config as needed:
 |---|---|---|
 | `namespace` | `default` | Namespace holding the pool and sandboxes |
 | `warm_pool` | unset | Pool to claim from. When unset the sandbox spec id is used, so several pools can be offered as runtimes |
-| `sandbox_url_pattern` | `http://{sandbox_id}.{namespace}.svc.cluster.local:{port}` | How a sandbox is reached. Placeholders: `{sandbox_id}`, `{namespace}`, `{port}` |
+| `sandbox_url_pattern` | `http://{sandbox_name}.{namespace}.svc.cluster.local:{port}` | How a sandbox is reached. Placeholders: `{sandbox_name}` (the Sandbox resource, which cluster DNS resolves), `{sandbox_id}` (app-level id), `{namespace}`, `{port}` |
 | `webhook_base_url` | in-cluster service URL | This app server, as reachable *from* a sandbox pod |
 | `max_num_sandboxes` | `10` | Concurrency cap; the oldest sandboxes are paused beyond it |
 | `inject_session_key` | `true` | Give every sandbox its own session API key |
@@ -55,7 +55,7 @@ Pod-level concerns — image, CPU/memory, `runtimeClassName`, network policy, vo
 The default `sandbox_url_pattern` is cluster-internal, which is right when the app
 server runs in the cluster and proxies traffic. Agent Canvas talks to the agent
 server directly, so a browser-facing deployment needs an externally routable
-pattern, for example `https://{sandbox_id}.sandboxes.example.com`, backed by an
+pattern, for example `https://{sandbox_name}.sandboxes.example.com`, backed by an
 Ingress or Gateway that routes to the per-sandbox Service.
 
 ### Session keys and warm pools

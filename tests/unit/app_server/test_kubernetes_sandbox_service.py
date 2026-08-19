@@ -53,7 +53,7 @@ def service(mock_sandbox_spec_service, custom_objects):
         namespace='agents',
         warm_pool=None,
         claim_name_prefix='oh-agent-server-',
-        sandbox_url_pattern='https://{sandbox_id}.example.com:{port}',
+        sandbox_url_pattern='https://{sandbox_name}.example.com:{port}',
         webhook_base_url='http://app-server:3000',
         exposed_ports=[],
         httpx_client=httpx.AsyncClient(),
@@ -74,7 +74,8 @@ def _claim(sandbox_id='sb1', sandbox_name='sb-1', env=None):
             'creationTimestamp': '2026-08-19T10:00:00Z',
         },
         'spec': {'env': env if env is not None else []},
-        'status': {'sandboxName': sandbox_name},
+        # The controller reports the Sandbox it created under status.sandbox.
+        'status': {'sandbox': {'name': sandbox_name}},
     }
 
 
@@ -126,7 +127,7 @@ async def test_start_sandbox_can_skip_session_key_injection(
         namespace='agents',
         warm_pool='pinned-pool',
         claim_name_prefix='oh-',
-        sandbox_url_pattern='https://{sandbox_id}.example.com:{port}',
+        sandbox_url_pattern='https://{sandbox_name}.example.com:{port}',
         webhook_base_url='http://app-server:3000',
         exposed_ports=[],
         httpx_client=httpx.AsyncClient(),
@@ -169,7 +170,8 @@ async def test_get_sandbox_running_exposes_urls_and_key(service, custom_objects)
     assert info is not None
     assert info.status == SandboxStatus.RUNNING
     assert info.session_api_key == 'secret-key'
-    assert info.exposed_urls[0].url == 'https://sb1.example.com:8000'
+    # DNS resolves the Sandbox resource name, not the app-level id.
+    assert info.exposed_urls[0].url == 'https://sb-1.example.com:8000'
 
 
 async def test_get_sandbox_missing_returns_none(service, custom_objects):

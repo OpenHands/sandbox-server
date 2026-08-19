@@ -240,12 +240,19 @@ class KubernetesSandboxService(SandboxService):
 
         return SandboxStatus.STARTING, None
 
-    def _exposed_urls(self, sandbox_id: str) -> list[ExposedUrl]:
+    def _exposed_urls(self, sandbox_id: str, sandbox_name: str) -> list[ExposedUrl]:
+        """Build the URLs for a running sandbox.
+
+        ``sandbox_name`` is the Sandbox resource, which is what cluster DNS
+        resolves; ``sandbox_id`` is the app-level id, useful for ingress routes
+        that key off it.
+        """
         return [
             ExposedUrl(
                 name=port.name,
                 url=self.sandbox_url_pattern.format(
                     sandbox_id=sandbox_id,
+                    sandbox_name=sandbox_name,
                     namespace=self.namespace,
                     port=port.container_port,
                 ),
@@ -267,7 +274,7 @@ class KubernetesSandboxService(SandboxService):
         if not sandbox_id:
             return None
 
-        sandbox_name = (claim.get('status') or {}).get('sandboxName')
+        sandbox_name = _sandbox_name(claim)
         sandbox = None
         if sandbox_name:
             sandbox = await asyncio.to_thread(
@@ -298,7 +305,7 @@ class KubernetesSandboxService(SandboxService):
                 else None
             ),
             exposed_urls=(
-                self._exposed_urls(sandbox_id)
+                self._exposed_urls(sandbox_id, sandbox_name or '')
                 if status == SandboxStatus.RUNNING
                 else []
             ),
@@ -447,7 +454,7 @@ class KubernetesSandboxService(SandboxService):
         claim = await asyncio.to_thread(self._get_claim_sync, sandbox_id)
         if claim is None:
             return False
-        sandbox_name = (claim.get('status') or {}).get('sandboxName')
+        sandbox_name = _sandbox_name(claim)
         if not sandbox_name:
             # Still being provisioned; there is nothing to suspend or resume yet.
             return mode == 'Running'
@@ -468,6 +475,12 @@ class KubernetesSandboxService(SandboxService):
             return False
         await asyncio.to_thread(self._delete_claim_sync, name)
         return True
+
+
+def _sandbox_name(claim: dict) -> str | None:
+    """Name of the Sandbox the controller created for this claim, if any."""
+    status = claim.get('status') or {}
+    return (status.get('sandbox') or {}).get('name')
 
 
 def _claim_condition_message(claim: dict) -> str | None:
@@ -494,12 +507,13 @@ class KubernetesSandboxServiceInjector(SandboxServiceInjector):
     )
     claim_name_prefix: str = 'oh-agent-server-'
     sandbox_url_pattern: str = Field(
-        default='http://{sandbox_id}.{namespace}.svc.cluster.local:{port}',
+        default='http://{sandbox_name}.{namespace}.svc.cluster.local:{port}',
         description=(
-            'URL pattern for reaching a sandbox. Placeholders: {sandbox_id}, '
-            '{namespace} and {port}. The default suits an app server running in '
-            'the same cluster; browsers need an externally routable pattern such '
-            'as https://{sandbox_id}.sandboxes.example.com.'
+            'URL pattern for reaching a sandbox. Placeholders: {sandbox_name} '
+            '(the Sandbox resource, which cluster DNS resolves), {sandbox_id} '
+            '(the app-level id), {namespace} and {port}. The default suits an app '
+            'server running in the same cluster; browsers need an externally '
+            'routable pattern such as https://{sandbox_name}.sandboxes.example.com.'
         ),
     )
     webhook_base_url: str = Field(
