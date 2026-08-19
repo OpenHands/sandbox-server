@@ -75,3 +75,39 @@ kubectl get sandboxclaim,sandbox,pods
 A running conversation shows a claim, a Sandbox reporting `Ready`, and a pod. The
 app server pauses a sandbox by setting `spec.operatingMode: Suspended` (the pod is
 removed, the volume is kept) and resumes it by setting `Running`.
+
+## End-to-end check
+
+Verified on a kind cluster and on GKE with the manifests in this directory.
+
+```bash
+# 1. cluster + controller + manifests (see Prerequisites above)
+kind create cluster --name ohk8s
+kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.2/sandbox-with-extensions.yaml"
+kubectl -n agent-sandbox-system rollout status deploy --timeout=240s
+kubectl apply -f deploy/kubernetes/
+
+# optional on kind: preload the image so the first sandbox starts quickly
+docker pull ghcr.io/openhands/agent-server:1.37.1-python
+kind load docker-image ghcr.io/openhands/agent-server:1.37.1-python --name ohk8s
+
+# 2. run the app server against it
+RUNTIME=kubernetes SERVE_FRONTEND=false make start
+
+# 3. drive a sandbox through the API
+curl -X POST localhost:3000/api/v1/sandboxes -H 'Content-Type: application/json' -d '{}'
+curl localhost:3000/api/v1/sandboxes/search
+curl -X POST localhost:3000/api/v1/sandboxes/<id>/pause
+curl -X POST localhost:3000/api/v1/sandboxes/<id>/resume
+```
+
+While a sandbox runs you should see a claim, a ready Sandbox, and a pod:
+
+```bash
+kubectl get sandboxclaim,sandbox,pods
+```
+
+Pausing sets `spec.operatingMode: Suspended` on the Sandbox (the pod goes away, the
+volume stays); resuming sets it back to `Running`. Port-forwarding to the pod and
+calling `/health` should return 200, and an authenticated endpoint should return
+200 with the sandbox's `X-Session-API-Key` and 401 without it.
