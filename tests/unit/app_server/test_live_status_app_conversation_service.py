@@ -1151,6 +1151,29 @@ class TestLiveStatusAppConversationService:
         assert 'branch:main' in tags
         assert 'git_provider:github' in tags
 
+    def test_build_observability_context_includes_trigger(self):
+        conversation_id = uuid4()
+
+        metadata, tags = self.service._build_observability_context(
+            conversation_id,
+            agent_kind='openhands',
+            trigger=ConversationTrigger.AUTOMATION,
+        )
+
+        assert metadata['trigger'] == 'automation'
+        assert 'trigger:automation' in tags
+
+    def test_build_observability_context_omits_trigger_when_unset(self):
+        conversation_id = uuid4()
+
+        metadata, tags = self.service._build_observability_context(
+            conversation_id,
+            agent_kind='openhands',
+        )
+
+        assert 'trigger' not in metadata
+        assert not any(tag.startswith('trigger:') for tag in tags)
+
     def test_app_conversation_start_request_accepts_observability_fields(self):
         request = AppConversationStartRequest(
             observability_span_name='mySpanName',
