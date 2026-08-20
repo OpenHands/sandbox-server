@@ -1591,6 +1591,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         conversation_id: UUID,
         *,
         agent_kind: str,
+        trigger: ConversationTrigger | None = None,
         selected_repository: str | None = None,
         selected_branch: str | None = None,
         git_provider: ProviderType | None = None,
@@ -1608,6 +1609,9 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         }
         tags = ['app:openhands', f'agent_kind:{agent_kind}']
 
+        if trigger:
+            metadata['trigger'] = trigger.value
+            tags.append(f'trigger:{trigger.value}')
         if selected_repository:
             metadata['repo_name'] = selected_repository
             tags.append(f'repo:{selected_repository}')
@@ -2163,6 +2167,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         observability_metadata, observability_tags = self._build_observability_context(
             conversation_id,
             agent_kind='openhands',
+            trigger=trigger,
             selected_repository=selected_repository,
             selected_branch=selected_branch,
             git_provider=git_provider,
@@ -2453,6 +2458,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         observability_metadata, observability_tags = self._build_observability_context(
             conversation_id,
             agent_kind='acp',
+            trigger=trigger,
             selected_repository=selected_repository,
             selected_branch=selected_branch,
             git_provider=git_provider,
