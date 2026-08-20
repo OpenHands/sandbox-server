@@ -3,8 +3,8 @@
 Each sandbox is a ``SandboxClaim``; the agent-sandbox controller turns that into a
 ``Sandbox`` and a pod running the agent server. Compared with the docker service
 this gains multi-node scheduling, pause/resume that keeps a persistent volume, and
-optional gVisor / Kata isolation -- all configured on the cluster side in a
-``SandboxTemplate`` rather than here.
+optional gVisor or Kata isolation. All of that is configured on the cluster side in
+a ``SandboxTemplate`` rather than here.
 
 Like the docker service this holds no state of its own: the cluster is the source
 of truth. The per-sandbox session API key is injected as an environment variable on
@@ -531,9 +531,9 @@ class KubernetesSandboxServiceInjector(SandboxServiceInjector):
         default=True,
         description=(
             'Inject a unique session API key into each sandbox. This is required '
-            'whenever sandboxes are reachable by more than one user. Note that '
-            'injecting environment variables makes agent-sandbox cold start the '
-            'pod rather than take a pre-warmed one; set this to False only for '
+            'whenever sandboxes are reachable by more than one user. Injecting '
+            'environment variables makes agent-sandbox cold start the pod rather '
+            'than take a pre-warmed one, so set this to False only for '
             'single-user deployments whose SandboxTemplate already carries a key.'
         ),
     )

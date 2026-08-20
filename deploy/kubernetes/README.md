@@ -47,8 +47,8 @@ Everything else has a default; override through config as needed:
 | `inject_session_key` | `true` | Give every sandbox its own session API key |
 | `shutdown_after_seconds` | unset | TTL safety net; the controller deletes the claim afterwards |
 
-Pod-level concerns — image, CPU/memory, `runtimeClassName`, network policy, volumes
-— live in the `SandboxTemplate`, not here.
+Pod-level concerns live in the `SandboxTemplate` rather than here. That covers the
+image, CPU and memory, `runtimeClassName`, network policy and volumes.
 
 ### Reaching sandboxes from a browser
 
@@ -63,8 +63,8 @@ Ingress or Gateway that routes to the per-sandbox Service.
 The app server gives each sandbox a unique session API key by injecting it as an
 environment variable on the claim. agent-sandbox cold starts a pod whenever a claim
 injects environment variables, so pre-warmed replicas are only used when
-`inject_session_key` is `false` — appropriate for a single-user deployment whose
-template already carries a key, but not for shared clusters.
+`inject_session_key` is `false`. That is fine for a single-user deployment whose
+template already carries a key, but not for a shared cluster.
 
 ## Verifying
 

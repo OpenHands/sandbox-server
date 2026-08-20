@@ -1,8 +1,8 @@
 """Sandbox specs for the kubernetes (agent-sandbox) backend.
 
-With agent-sandbox the pod -- and therefore the agent server image -- is defined
-cluster side by a ``SandboxTemplate``, so a spec here names the ``SandboxWarmPool``
-that references that template rather than an image. Offering more than one spec
+With agent-sandbox the pod is defined cluster side by a ``SandboxTemplate``, and
+that template also fixes the agent server image. A spec here therefore names the
+``SandboxWarmPool`` that references the template rather than naming an image. Offering more than one spec
 lets an operator expose several runtimes (for example a plain pool and a
 gVisor-isolated one) for users to choose between.
 """
