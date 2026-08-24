@@ -9,15 +9,19 @@ Covers the mapping between agent-sandbox custom resources and SandboxInfo:
 No cluster is required: the CustomObjectsApi is mocked.
 """
 
+import re
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from kubernetes.client.rest import ApiException
 
+from openhands.app_server.errors import SandboxError
 from openhands.app_server.sandbox.kubernetes_sandbox_service import (
     MANAGED_BY_LABEL,
     MANAGED_BY_VALUE,
     SANDBOX_ID_LABEL,
+    SESSION_KEY_HASH_LABEL,
     SPEC_ID_ANNOTATION,
     KubernetesSandboxService,
 )
@@ -149,9 +153,86 @@ async def test_claim_name_is_dns_safe(service, custom_objects):
     await service.start_sandbox(sandbox_id='Mixed_Case.Id')
 
     body = custom_objects.create_namespaced_custom_object.call_args.kwargs['body']
-    assert body['metadata']['name'] == 'oh-agent-server-mixed-case-id'
+    name = body['metadata']['name']
+    assert name.startswith('oh-agent-server-mixed-case-id-')
+    assert re.fullmatch(r'[a-z0-9]([-a-z0-9]*[a-z0-9])?', name), name
     # The label keeps the id verbatim so lookups stay exact.
     assert body['metadata']['labels'][SANDBOX_ID_LABEL] == 'Mixed_Case.Id'
+
+
+async def test_sanitised_ids_do_not_collide(service, custom_objects):
+    """Ids that sanitise to the same string must still get distinct claims."""
+    await service.start_sandbox(sandbox_id='abc_def')
+    first = custom_objects.create_namespaced_custom_object.call_args.kwargs['body']
+    await service.start_sandbox(sandbox_id='abc.def')
+    second = custom_objects.create_namespaced_custom_object.call_args.kwargs['body']
+
+    assert first['metadata']['name'] != second['metadata']['name']
+
+
+async def test_duplicate_id_is_reported_as_such(service, custom_objects):
+    custom_objects.create_namespaced_custom_object.side_effect = ApiException(
+        status=409, reason='Conflict'
+    )
+
+    with pytest.raises(SandboxError, match='already exists'):
+        await service.start_sandbox(sandbox_id='dupe')
+
+
+async def test_search_fans_out_claim_conversions(service, custom_objects):
+    """Every claim is converted; the Sandbox reads happen concurrently."""
+    custom_objects.list_namespaced_custom_object.return_value = {
+        'items': [
+            _claim(sandbox_id='sb1', sandbox_name='sb-1'),
+            _claim(sandbox_id='sb2', sandbox_name='sb-2'),
+        ]
+    }
+    custom_objects.get_namespaced_custom_object.return_value = _sandbox()
+
+    page = await service.search_sandboxes()
+
+    assert sorted(item.id for item in page.items) == ['sb1', 'sb2']
+
+
+async def test_session_key_lookup_filters_server_side(service, custom_objects):
+    """The session key is looked up through a label selector, not a full scan."""
+    key = 'secret-key'
+    claim = _claim(env=[{'name': SESSION_API_KEY_VARIABLE, 'value': key}])
+    custom_objects.list_namespaced_custom_object.return_value = {'items': [claim]}
+    custom_objects.get_namespaced_custom_object.return_value = _sandbox()
+
+    info = await service.get_sandbox_by_session_api_key(key)
+
+    assert info is not None and info.id == 'sb1'
+    selector = custom_objects.list_namespaced_custom_object.call_args.kwargs[
+        'label_selector'
+    ]
+    assert SESSION_KEY_HASH_LABEL in selector
+    assert key not in selector, 'the raw key must not be sent as a label value'
+
+
+async def test_session_key_hash_collision_does_not_authenticate(
+    service, custom_objects
+):
+    """A claim returned by the label filter still has to match the real key."""
+    custom_objects.list_namespaced_custom_object.return_value = {
+        'items': [_claim(env=[{'name': SESSION_API_KEY_VARIABLE, 'value': 'other'}])]
+    }
+
+    assert await service.get_sandbox_by_session_api_key('secret-key') is None
+
+
+async def test_start_sandbox_labels_the_session_key_hash(service, custom_objects):
+    await service.start_sandbox()
+
+    body = custom_objects.create_namespaced_custom_object.call_args.kwargs['body']
+    env = {item['name']: item['value'] for item in body['spec']['env']}
+    labels = body['metadata']['labels']
+    assert labels[SESSION_KEY_HASH_LABEL] == KubernetesSandboxService._session_key_hash(
+        env[SESSION_API_KEY_VARIABLE]
+    )
+    # The label is an index, never the secret itself.
+    assert labels[SESSION_KEY_HASH_LABEL] != env[SESSION_API_KEY_VARIABLE]
 
 
 async def test_get_sandbox_running_exposes_urls_and_key(service, custom_objects):

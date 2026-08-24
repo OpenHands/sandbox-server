@@ -2,9 +2,10 @@
 
 With agent-sandbox the pod is defined cluster side by a ``SandboxTemplate``, and
 that template also fixes the agent server image. A spec here therefore names the
-``SandboxWarmPool`` that references the template rather than naming an image. Offering more than one spec
-lets an operator expose several runtimes (for example a plain pool and a
-gVisor-isolated one) for users to choose between.
+``SandboxWarmPool`` that references the template rather than naming an image.
+
+Offering more than one spec lets an operator expose several runtimes, for example a
+plain pool and a gVisor-isolated one, for users to choose between.
 """
 
 from typing import AsyncGenerator

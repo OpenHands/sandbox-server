@@ -18,6 +18,7 @@ the agent server.
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -74,6 +75,9 @@ MANAGED_BY_VALUE = 'openhands-app-server'
 SANDBOX_ID_LABEL = 'agents.openhands.dev/sandbox-id'
 # The spec id is an image name, which is not a valid label value.
 SPEC_ID_ANNOTATION = 'agents.openhands.dev/sandbox-spec-id'
+# Lookup index for the session key. The env var stays the canonical secret; this is
+# a one-way hash so the API server can filter instead of us scanning every claim.
+SESSION_KEY_HASH_LABEL = 'agents.openhands.dev/session-key-hash'
 
 _INVALID_NAME_CHARS = re.compile(r'[^a-z0-9-]+')
 
@@ -138,19 +142,35 @@ class KubernetesSandboxService(SandboxService):
     # ── Naming ────────────────────────────────────────────────────────────────
 
     def _claim_name(self, sandbox_id: str) -> str:
-        """Build an RFC 1123 resource name for a sandbox id."""
+        """Build an RFC 1123 resource name for a sandbox id.
+
+        Sanitising alone is not injective (``a_b`` and ``a.b`` both become ``a-b``),
+        so a short digest of the original id is appended to keep distinct sandboxes
+        on distinct claims.
+        """
         name = _INVALID_NAME_CHARS.sub('-', sandbox_id.lower()).strip('-')
-        return f'{self.claim_name_prefix}{name}'
+        digest = hashlib.sha256(sandbox_id.encode()).hexdigest()[:6]
+        if not name:
+            return f'{self.claim_name_prefix}{digest}'
+        return f'{self.claim_name_prefix}{name}-{digest}'
+
+    @staticmethod
+    def _session_key_hash(session_api_key: str) -> str:
+        """One-way index for a session key, short enough for a label value."""
+        return hashlib.sha256(session_api_key.encode()).hexdigest()[:32]
 
     # ── Kubernetes access (sync, run in a worker thread) ───────────────────────
 
-    def _list_claims_sync(self) -> list[dict]:
+    def _list_claims_sync(self, extra_selector: str | None = None) -> list[dict]:
+        selector = f'{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}'
+        if extra_selector:
+            selector = f'{selector},{extra_selector}'
         response = self._custom_objects.list_namespaced_custom_object(
             group=CLAIM_GROUP,
             version=CLAIM_VERSION,
             namespace=self.namespace,
             plural=CLAIM_PLURAL,
-            label_selector=f'{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}',
+            label_selector=selector,
         )
         return response.get('items', [])
 
@@ -321,11 +341,12 @@ class KubernetesSandboxService(SandboxService):
         limit: int = 100,
     ) -> SandboxPage:
         claims = await asyncio.to_thread(self._list_claims_sync)
-        items = []
-        for claim in claims:
-            info = await self._claim_to_sandbox_info(claim)
-            if info is not None:
-                items.append(info)
+        # Each conversion reads the claim's Sandbox, so run them concurrently
+        # rather than paying one API round-trip per claim in series.
+        infos = await asyncio.gather(
+            *[self._claim_to_sandbox_info(claim) for claim in claims]
+        )
+        items = [info for info in infos if info is not None]
         items.sort(key=lambda item: item.created_at)
 
         offset = int(page_id) if page_id else 0
@@ -339,27 +360,38 @@ class KubernetesSandboxService(SandboxService):
             return None
         return await self._claim_to_sandbox_info(claim)
 
+    async def _claim_for_session_api_key(self, session_api_key: str) -> dict | None:
+        """Find a claim by session key, filtered by the API server.
+
+        The hash label narrows the query to (almost always) a single claim; the
+        env var is still compared so a hash collision cannot authenticate.
+        """
+        selector = f'{SESSION_KEY_HASH_LABEL}={self._session_key_hash(session_api_key)}'
+        claims = await asyncio.to_thread(self._list_claims_sync, selector)
+        for claim in claims:
+            if self._session_api_key(claim) == session_api_key:
+                return claim
+        return None
+
     async def get_sandbox_by_session_api_key(
         self, session_api_key: str
     ) -> SandboxInfo | None:
-        claims = await asyncio.to_thread(self._list_claims_sync)
-        for claim in claims:
-            if self._session_api_key(claim) == session_api_key:
-                return await self._claim_to_sandbox_info(claim)
-        return None
+        claim = await self._claim_for_session_api_key(session_api_key)
+        if claim is None:
+            return None
+        return await self._claim_to_sandbox_info(claim)
 
     async def get_sandbox_record_by_session_api_key(
         self, session_api_key: str
     ) -> SandboxRecord | None:
-        claims = await asyncio.to_thread(self._list_claims_sync)
-        for claim in claims:
-            if self._session_api_key(claim) != session_api_key:
-                continue
-            labels = (claim.get('metadata') or {}).get('labels') or {}
-            sandbox_id = labels.get(SANDBOX_ID_LABEL)
-            if sandbox_id:
-                return SandboxRecord(id=sandbox_id, created_by_user_id=None)
-        return None
+        claim = await self._claim_for_session_api_key(session_api_key)
+        if claim is None:
+            return None
+        labels = (claim.get('metadata') or {}).get('labels') or {}
+        sandbox_id = labels.get(SANDBOX_ID_LABEL)
+        if not sandbox_id:
+            return None
+        return SandboxRecord(id=sandbox_id, created_by_user_id=None)
 
     async def start_sandbox(
         self, sandbox_spec_id: str | None = None, sandbox_id: str | None = None
@@ -394,10 +426,15 @@ class KubernetesSandboxService(SandboxService):
                 env_vars[f'OH_ALLOW_CORS_ORIGINS_{len(seen)}'] = origin
                 seen.add(origin)
 
+        labels = {
+            MANAGED_BY_LABEL: MANAGED_BY_VALUE,
+            SANDBOX_ID_LABEL: sandbox_id,
+        }
         session_api_key = None
         if self.inject_session_key:
             session_api_key = base62.encodebytes(os.urandom(32))
             env_vars[SESSION_API_KEY_VARIABLE] = session_api_key
+            labels[SESSION_KEY_HASH_LABEL] = self._session_key_hash(session_api_key)
 
         # The warm pool selects the SandboxTemplate (and therefore the image); when
         # it is not pinned in config the spec id names the pool, so the UI can offer
@@ -410,10 +447,7 @@ class KubernetesSandboxService(SandboxService):
             'metadata': {
                 'name': self._claim_name(sandbox_id),
                 'namespace': self.namespace,
-                'labels': {
-                    MANAGED_BY_LABEL: MANAGED_BY_VALUE,
-                    SANDBOX_ID_LABEL: sandbox_id,
-                },
+                'labels': labels,
                 'annotations': {SPEC_ID_ANNOTATION: sandbox_spec.id},
             },
             'spec': {
@@ -433,6 +467,10 @@ class KubernetesSandboxService(SandboxService):
         try:
             await asyncio.to_thread(self._create_claim_sync, claim)
         except ApiException as e:
+            if e.status == 409:
+                raise SandboxError(
+                    f'A sandbox with id {sandbox_id} already exists'
+                ) from e
             raise SandboxError(f'Could not create sandbox claim: {e.reason}') from e
 
         return SandboxInfo(
