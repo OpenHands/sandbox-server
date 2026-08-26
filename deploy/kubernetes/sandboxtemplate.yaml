@@ -15,11 +15,19 @@ spec:
   # the controller rejects the injection and sandboxes come up unauthenticated.
   envVarsInjectionPolicy: Allowed
 
-  # The controller-managed NetworkPolicy allows public egress but blocks private
-  # ranges. Sandboxes need to reach this app server for webhook callbacks, so allow
-  # that explicitly rather than dropping the policy altogether:
+  # The controller-managed NetworkPolicy is restrictive in both directions: egress
+  # allows public ranges but blocks private ones, and ingress only admits the
+  # sandbox-router. The app server needs both, since sandboxes call back to it for
+  # webhooks and it dials the sandbox Service directly. Allow exactly that rather
+  # than dropping the policy:
   #
   # networkPolicy:
+  #   ingress:
+  #     # This app server, which connects to the agent server in the pod
+  #     - from:
+  #         - podSelector:
+  #             matchLabels: { app: openhands-app-server }
+  #       ports: [{ protocol: TCP, port: 8000 }]
   #   egress:
   #     # DNS
   #     - to:
@@ -33,6 +41,9 @@ spec:
   #       ports: [{ protocol: TCP, port: 3000 }]
   #     # Hosted LLM APIs over HTTPS
   #     - ports: [{ protocol: TCP, port: 443 }]
+  #
+  # Note that many local clusters (including kind's default CNI) do not enforce
+  # NetworkPolicy at all, so a missing rule only shows up on a cluster that does.
 
   volumeClaimTemplates:
     - metadata:

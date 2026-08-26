@@ -12,7 +12,6 @@ No cluster is required: the CustomObjectsApi is mocked.
 import re
 from unittest.mock import AsyncMock, MagicMock
 
-import httpx
 import pytest
 from kubernetes.client.rest import ApiException
 
@@ -60,7 +59,6 @@ def service(mock_sandbox_spec_service, custom_objects):
         sandbox_url_pattern='https://{sandbox_name}.example.com:{port}',
         webhook_base_url='http://app-server:3000',
         exposed_ports=[],
-        httpx_client=httpx.AsyncClient(),
         max_num_sandboxes=5,
         _custom_objects=custom_objects,
     )
@@ -134,7 +132,6 @@ async def test_start_sandbox_can_skip_session_key_injection(
         sandbox_url_pattern='https://{sandbox_name}.example.com:{port}',
         webhook_base_url='http://app-server:3000',
         exposed_ports=[],
-        httpx_client=httpx.AsyncClient(),
         max_num_sandboxes=5,
         inject_session_key=False,
         _custom_objects=custom_objects,
@@ -278,7 +275,7 @@ async def test_suspended_sandbox_is_paused(service, custom_objects):
 async def test_failed_sandbox_reports_error_with_detail(service, custom_objects):
     custom_objects.list_namespaced_custom_object.return_value = {'items': [_claim()]}
     custom_objects.get_namespaced_custom_object.return_value = _sandbox(
-        ready=False, reason='SandboxFailed', message='ImagePullBackOff'
+        ready=False, reason='PodFailed', message='ImagePullBackOff'
     )
 
     info = await service.get_sandbox('sb1')
@@ -334,3 +331,62 @@ async def test_delete_sandbox(service, custom_objects):
 
     custom_objects.list_namespaced_custom_object.return_value = {'items': []}
     assert await service.delete_sandbox('sb1') is False
+
+
+@pytest.mark.parametrize(
+    'reason,expected',
+    [
+        ('PodFailed', SandboxStatus.ERROR),
+        ('PodSucceeded', SandboxStatus.ERROR),
+        ('SandboxExpired', SandboxStatus.ERROR),
+        ('DependenciesNotReady', SandboxStatus.STARTING),
+    ],
+)
+async def test_terminal_ready_reasons(service, custom_objects, reason, expected):
+    """The reasons the controller actually emits must not read as STARTING."""
+    custom_objects.list_namespaced_custom_object.return_value = {'items': [_claim()]}
+    custom_objects.get_namespaced_custom_object.return_value = _sandbox(
+        ready=False, reason=reason, message='detail'
+    )
+
+    info = await service.get_sandbox('sb1')
+
+    assert info is not None
+    assert info.status == expected
+
+
+@pytest.mark.parametrize(
+    'bad_id',
+    [
+        'has,comma',
+        'has=equals',
+        'a' * 64,
+        '',
+        '-leading-dash',
+    ],
+)
+async def test_invalid_sandbox_ids_are_rejected(service, custom_objects, bad_id):
+    """Ids travel as label values, so a selector-breaking id must not be accepted."""
+    with pytest.raises(SandboxError, match='Invalid sandbox id'):
+        await service.start_sandbox(sandbox_id=bad_id)
+
+    custom_objects.create_namespaced_custom_object.assert_not_called()
+
+
+async def test_claim_name_fits_dns_label_limit(service, custom_objects):
+    await service.start_sandbox(sandbox_id='s' * 63)
+
+    body = custom_objects.create_namespaced_custom_object.call_args.kwargs['body']
+    name = body['metadata']['name']
+    # On a cold start this is also the Sandbox and Service name.
+    assert len(name) <= 63, name
+    assert re.fullmatch(r'[a-z0-9]([-a-z0-9]*[a-z0-9])?', name), name
+
+
+async def test_malformed_page_id_starts_from_the_beginning(service, custom_objects):
+    custom_objects.list_namespaced_custom_object.return_value = {'items': [_claim()]}
+    custom_objects.get_namespaced_custom_object.return_value = _sandbox()
+
+    page = await service.search_sandboxes(page_id='not-a-number')
+
+    assert [item.id for item in page.items] == ['sb1']

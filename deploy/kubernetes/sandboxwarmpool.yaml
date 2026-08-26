@@ -2,9 +2,10 @@
 # spec id (see kubernetes_sandbox_spec_service.py); define more pools to offer
 # users a choice of runtimes.
 #
-# Note: because the app server injects a per-sandbox session API key, agent-sandbox
-# cold starts each pod from the template rather than handing over a pre-warmed one,
-# so replicas only helps if you also set `inject_session_key: false`.
+# Note: agent-sandbox cold starts any claim that carries spec.env, and the app
+# server always sets webhook and port variables on the claim, so pre-warmed
+# replicas are not used today no matter how inject_session_key is set. Keep this at
+# 0 until claims can adopt a warm pod and receive their configuration afterwards.
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool
 metadata:

@@ -27,7 +27,6 @@ from datetime import datetime, timedelta
 from typing import Any, AsyncGenerator
 
 import base62
-import httpx
 from fastapi import Request
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
@@ -80,6 +79,13 @@ SPEC_ID_ANNOTATION = 'agents.openhands.dev/sandbox-spec-id'
 SESSION_KEY_HASH_LABEL = 'agents.openhands.dev/session-key-hash'
 
 _INVALID_NAME_CHARS = re.compile(r'[^a-z0-9-]+')
+# Sandbox ids travel as label values, so they are limited to the label charset and
+# length; anything else would either be rejected or corrupt a label selector.
+_VALID_SANDBOX_ID = re.compile(r'[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$')
+_MAX_NAME_LENGTH = 63
+# Ready=False reasons the controller treats as terminal: the pod finished either
+# way, or the claim outlived its lifecycle.
+_TERMINAL_READY_REASONS = frozenset({'PodFailed', 'PodSucceeded', 'SandboxExpired'})
 
 
 class ExposedPort(BaseModel):
@@ -122,7 +128,6 @@ class KubernetesSandboxService(SandboxService):
     sandbox_url_pattern: str
     webhook_base_url: str
     exposed_ports: list[ExposedPort]
-    httpx_client: httpx.AsyncClient
     max_num_sandboxes: int
     web_url: str | None = None
     permitted_cors_origins: list[str] = field(default_factory=list)
@@ -141,18 +146,37 @@ class KubernetesSandboxService(SandboxService):
 
     # ── Naming ────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _validate_sandbox_id(sandbox_id: str) -> None:
+        """Reject ids that cannot be stored as a label value.
+
+        The id is the lookup key, so it has to survive a label selector intact:
+        characters such as ``,`` and ``=`` would otherwise change the meaning of
+        the selector rather than just fail to match.
+        """
+        if not _VALID_SANDBOX_ID.match(sandbox_id):
+            raise SandboxError(
+                f'Invalid sandbox id {sandbox_id!r}: must be 1 to 63 characters of '
+                'letters, digits, dot, dash or underscore, starting and ending '
+                'with a letter or digit'
+            )
+
     def _claim_name(self, sandbox_id: str) -> str:
         """Build an RFC 1123 resource name for a sandbox id.
 
         Sanitising alone is not injective (``a_b`` and ``a.b`` both become ``a-b``),
         so a short digest of the original id is appended to keep distinct sandboxes
-        on distinct claims.
+        on distinct claims. On a cold start this name is also the Sandbox and
+        Service name, so it has to stay within the 63 character DNS label limit.
         """
-        name = _INVALID_NAME_CHARS.sub('-', sandbox_id.lower()).strip('-')
         digest = hashlib.sha256(sandbox_id.encode()).hexdigest()[:6]
+        suffix = f'-{digest}'
+        budget = _MAX_NAME_LENGTH - len(self.claim_name_prefix) - len(suffix)
+        name = _INVALID_NAME_CHARS.sub('-', sandbox_id.lower()).strip('-')
+        name = name[:budget].strip('-') if budget > 0 else ''
         if not name:
             return f'{self.claim_name_prefix}{digest}'
-        return f'{self.claim_name_prefix}{name}-{digest}'
+        return f'{self.claim_name_prefix}{name}{suffix}'
 
     @staticmethod
     def _session_key_hash(session_api_key: str) -> str:
@@ -254,8 +278,8 @@ class KubernetesSandboxService(SandboxService):
                 return SandboxStatus.RUNNING, None
             reason = condition.get('reason') or ''
             message = condition.get('message')
-            if reason in ('SandboxFailed', 'PodFailed', 'Failed'):
-                return SandboxStatus.ERROR, message
+            if reason in _TERMINAL_READY_REASONS:
+                return SandboxStatus.ERROR, message or reason
             return SandboxStatus.STARTING, message
 
         return SandboxStatus.STARTING, None
@@ -349,7 +373,12 @@ class KubernetesSandboxService(SandboxService):
         items = [info for info in infos if info is not None]
         items.sort(key=lambda item: item.created_at)
 
-        offset = int(page_id) if page_id else 0
+        # A malformed page_id starts from the beginning rather than failing the
+        # request, matching the remote backend.
+        try:
+            offset = max(int(page_id), 0) if page_id else 0
+        except ValueError:
+            offset = 0
         page = items[offset : offset + limit]
         next_page_id = str(offset + limit) if len(items) > offset + limit else None
         return SandboxPage(items=page, next_page_id=next_page_id)
@@ -408,6 +437,8 @@ class KubernetesSandboxService(SandboxService):
 
         if sandbox_id is None:
             sandbox_id = base62.encodebytes(os.urandom(16))
+        else:
+            self._validate_sandbox_id(sandbox_id)
 
         env_vars = dict(sandbox_spec.initial_env)
         env_vars[WEBHOOK_CALLBACK_VARIABLE] = (
@@ -569,10 +600,10 @@ class KubernetesSandboxServiceInjector(SandboxServiceInjector):
         default=True,
         description=(
             'Inject a unique session API key into each sandbox. This is required '
-            'whenever sandboxes are reachable by more than one user. Injecting '
-            'environment variables makes agent-sandbox cold start the pod rather '
-            'than take a pre-warmed one, so set this to False only for '
-            'single-user deployments whose SandboxTemplate already carries a key.'
+            'whenever sandboxes are reachable by more than one user. Turning it '
+            'off does not restore warm-pool starts: every claim carries webhook '
+            'and port environment variables, and any claim with spec.env is cold '
+            'started from the template by design.'
         ),
     )
     shutdown_after_seconds: int | None = Field(
@@ -590,16 +621,12 @@ class KubernetesSandboxServiceInjector(SandboxServiceInjector):
         # Defined inline to prevent circular lookup
         from openhands.app_server.config import (
             get_global_config,
-            get_httpx_client,
             get_sandbox_spec_service,
         )
 
         config = get_global_config()
 
-        async with (
-            get_httpx_client(state) as httpx_client,
-            get_sandbox_spec_service(state) as sandbox_spec_service,
-        ):
+        async with get_sandbox_spec_service(state) as sandbox_spec_service:
             yield KubernetesSandboxService(
                 sandbox_spec_service=sandbox_spec_service,
                 namespace=self.namespace,
@@ -608,7 +635,6 @@ class KubernetesSandboxServiceInjector(SandboxServiceInjector):
                 sandbox_url_pattern=self.sandbox_url_pattern,
                 webhook_base_url=self.webhook_base_url,
                 exposed_ports=self.exposed_ports,
-                httpx_client=httpx_client,
                 max_num_sandboxes=self.max_num_sandboxes,
                 web_url=config.web_url,
                 permitted_cors_origins=config.permitted_cors_origins,

@@ -62,9 +62,15 @@ Ingress or Gateway that routes to the per-sandbox Service.
 
 The app server gives each sandbox a unique session API key by injecting it as an
 environment variable on the claim. agent-sandbox cold starts a pod whenever a claim
-injects environment variables, so pre-warmed replicas are only used when
-`inject_session_key` is `false`. That is fine for a single-user deployment whose
-template already carries a key, but not for a shared cluster.
+carries `spec.env`, and the app server always sets webhook and port variables there,
+so **pre-warmed replicas are never used today**, whatever `inject_session_key` is set
+to. Turning that flag off only drops the per-sandbox key, which is not safe on a
+shared cluster.
+
+Using the warm path would mean sending no claim environment at all: bake the
+configuration into the template and hand each sandbox its key through the agent
+server after the claim binds. That needs post-adoption credential injection from
+agent-sandbox, which does not exist yet.
 
 ## Verifying
 
