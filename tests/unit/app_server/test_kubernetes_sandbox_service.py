@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from kubernetes.client.rest import ApiException
+from pydantic import ValidationError
 
 from openhands.app_server.errors import SandboxError
 from openhands.app_server.sandbox.kubernetes_sandbox_service import (
@@ -23,6 +24,7 @@ from openhands.app_server.sandbox.kubernetes_sandbox_service import (
     SESSION_KEY_HASH_LABEL,
     SPEC_ID_ANNOTATION,
     KubernetesSandboxService,
+    KubernetesSandboxServiceInjector,
 )
 from openhands.app_server.sandbox.sandbox_models import AGENT_SERVER, SandboxStatus
 from openhands.app_server.sandbox.sandbox_service import (
@@ -390,3 +392,48 @@ async def test_malformed_page_id_starts_from_the_beginning(service, custom_objec
     page = await service.search_sandboxes(page_id='not-a-number')
 
     assert [item.id for item in page.items] == ['sb1']
+
+
+@pytest.mark.parametrize('bad_id', ['has,comma', 'has=equals', 'a' * 64])
+async def test_lookups_treat_unusable_ids_as_missing(service, custom_objects, bad_id):
+    """An id that would corrupt the selector must 404, not reach the API server."""
+    assert await service.get_sandbox(bad_id) is None
+    assert await service.pause_sandbox(bad_id) is False
+    assert await service.resume_sandbox(bad_id) is False
+    assert await service.delete_sandbox(bad_id) is False
+
+    custom_objects.list_namespaced_custom_object.assert_not_called()
+
+
+async def test_invalid_id_does_not_pause_existing_sandboxes(service, custom_objects):
+    """Validation runs before eviction, so a bad request has no side effects."""
+    with pytest.raises(SandboxError, match='Invalid sandbox id'):
+        await service.start_sandbox(sandbox_id='has,comma')
+
+    custom_objects.patch_namespaced_custom_object.assert_not_called()
+
+
+async def test_claim_name_fits_limit_with_a_long_prefix(
+    mock_sandbox_spec_service, custom_objects
+):
+    service = KubernetesSandboxService(
+        sandbox_spec_service=mock_sandbox_spec_service,
+        namespace='agents',
+        warm_pool=None,
+        claim_name_prefix='p' * 57,
+        sandbox_url_pattern='https://{sandbox_name}.example.com:{port}',
+        webhook_base_url='http://app-server:3000',
+        exposed_ports=[],
+        max_num_sandboxes=5,
+        _custom_objects=custom_objects,
+    )
+
+    await service.start_sandbox(sandbox_id='s' * 63)
+
+    body = custom_objects.create_namespaced_custom_object.call_args.kwargs['body']
+    assert len(body['metadata']['name']) <= 63
+
+
+def test_injector_rejects_a_prefix_that_cannot_fit_the_digest():
+    with pytest.raises(ValidationError):
+        KubernetesSandboxServiceInjector(claim_name_prefix='p' * 58)

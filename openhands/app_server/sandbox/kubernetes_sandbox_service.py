@@ -19,6 +19,7 @@ the agent server.
 
 import asyncio
 import hashlib
+import hmac
 import logging
 import os
 import re
@@ -83,6 +84,7 @@ _INVALID_NAME_CHARS = re.compile(r'[^a-z0-9-]+')
 # length; anything else would either be rejected or corrupt a label selector.
 _VALID_SANDBOX_ID = re.compile(r'[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$')
 _MAX_NAME_LENGTH = 63
+_NAME_DIGEST_LENGTH = 6
 # Ready=False reasons the controller treats as terminal: the pod finished either
 # way, or the claim outlived its lifecycle.
 _TERMINAL_READY_REASONS = frozenset({'PodFailed', 'PodSucceeded', 'SandboxExpired'})
@@ -169,13 +171,14 @@ class KubernetesSandboxService(SandboxService):
         on distinct claims. On a cold start this name is also the Sandbox and
         Service name, so it has to stay within the 63 character DNS label limit.
         """
-        digest = hashlib.sha256(sandbox_id.encode()).hexdigest()[:6]
+        digest = hashlib.sha256(sandbox_id.encode()).hexdigest()[:_NAME_DIGEST_LENGTH]
         suffix = f'-{digest}'
         budget = _MAX_NAME_LENGTH - len(self.claim_name_prefix) - len(suffix)
         name = _INVALID_NAME_CHARS.sub('-', sandbox_id.lower()).strip('-')
         name = name[:budget].strip('-') if budget > 0 else ''
         if not name:
-            return f'{self.claim_name_prefix}{digest}'
+            prefix = self.claim_name_prefix[: _MAX_NAME_LENGTH - len(digest)]
+            return f'{prefix}{digest}'
         return f'{self.claim_name_prefix}{name}{suffix}'
 
     @staticmethod
@@ -199,6 +202,10 @@ class KubernetesSandboxService(SandboxService):
         return response.get('items', [])
 
     def _get_claim_sync(self, sandbox_id: str) -> dict | None:
+        # Characters such as ',' and '=' would change the meaning of the selector,
+        # so an unusable id is treated as not found rather than interpolated.
+        if not _VALID_SANDBOX_ID.match(sandbox_id):
+            return None
         response = self._custom_objects.list_namespaced_custom_object(
             group=CLAIM_GROUP,
             version=CLAIM_VERSION,
@@ -398,7 +405,10 @@ class KubernetesSandboxService(SandboxService):
         selector = f'{SESSION_KEY_HASH_LABEL}={self._session_key_hash(session_api_key)}'
         claims = await asyncio.to_thread(self._list_claims_sync, selector)
         for claim in claims:
-            if self._session_api_key(claim) == session_api_key:
+            candidate = self._session_api_key(claim)
+            if candidate is not None and hmac.compare_digest(
+                candidate, session_api_key
+            ):
                 return claim
         return None
 
@@ -426,6 +436,11 @@ class KubernetesSandboxService(SandboxService):
         self, sandbox_spec_id: str | None = None, sandbox_id: str | None = None
     ) -> SandboxInfo:
         """Create a SandboxClaim for a new sandbox."""
+        if sandbox_id is None:
+            sandbox_id = base62.encodebytes(os.urandom(16))
+        else:
+            self._validate_sandbox_id(sandbox_id)
+
         await self.pause_old_sandboxes(self.max_num_sandboxes - 1)
 
         sandbox_spec = await resolve_sandbox_spec(
@@ -434,11 +449,6 @@ class KubernetesSandboxService(SandboxService):
             self.sandbox_spec_service,
             _logger,
         )
-
-        if sandbox_id is None:
-            sandbox_id = base62.encodebytes(os.urandom(16))
-        else:
-            self._validate_sandbox_id(sandbox_id)
 
         env_vars = dict(sandbox_spec.initial_env)
         env_vars[WEBHOOK_CALLBACK_VARIABLE] = (
@@ -574,7 +584,14 @@ class KubernetesSandboxServiceInjector(SandboxServiceInjector):
             'used as the pool name, which allows selecting between runtimes.'
         ),
     )
-    claim_name_prefix: str = 'oh-agent-server-'
+    claim_name_prefix: str = Field(
+        default='oh-agent-server-',
+        max_length=_MAX_NAME_LENGTH - _NAME_DIGEST_LENGTH,
+        description=(
+            'Prefix for claim names. Bounded so a claim name still fits the 63 '
+            'character DNS label limit once the uniqueness digest is appended.'
+        ),
+    )
     sandbox_url_pattern: str = Field(
         default='http://{sandbox_name}.{namespace}.svc.cluster.local:{port}',
         description=(
@@ -622,11 +639,15 @@ class KubernetesSandboxServiceInjector(SandboxServiceInjector):
         from openhands.app_server.config import (
             get_global_config,
             get_sandbox_spec_service,
+            get_user_context,
         )
 
         config = get_global_config()
 
-        async with get_sandbox_spec_service(state) as sandbox_spec_service:
+        async with (
+            get_sandbox_spec_service(state) as sandbox_spec_service,
+            get_user_context(state, request) as user_context,
+        ):
             yield KubernetesSandboxService(
                 sandbox_spec_service=sandbox_spec_service,
                 namespace=self.namespace,
@@ -640,4 +661,7 @@ class KubernetesSandboxServiceInjector(SandboxServiceInjector):
                 permitted_cors_origins=config.permitted_cors_origins,
                 inject_session_key=self.inject_session_key,
                 shutdown_after_seconds=self.shutdown_after_seconds,
+                default_sandbox_spec_id=(
+                    await user_context.get_default_sandbox_spec_id()
+                ),
             )
