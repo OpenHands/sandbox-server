@@ -441,14 +441,16 @@ class KubernetesSandboxService(SandboxService):
         else:
             self._validate_sandbox_id(sandbox_id)
 
-        await self.pause_old_sandboxes(self.max_num_sandboxes - 1)
-
+        # Resolving first keeps an unknown spec id from evicting a sandbox on its
+        # way to raising.
         sandbox_spec = await resolve_sandbox_spec(
             sandbox_spec_id,
             self.default_sandbox_spec_id,
             self.sandbox_spec_service,
             _logger,
         )
+
+        await self.pause_old_sandboxes(self.max_num_sandboxes - 1)
 
         env_vars = dict(sandbox_spec.initial_env)
         env_vars[WEBHOOK_CALLBACK_VARIABLE] = (

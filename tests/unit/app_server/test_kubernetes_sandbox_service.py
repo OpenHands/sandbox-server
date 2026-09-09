@@ -437,3 +437,16 @@ async def test_claim_name_fits_limit_with_a_long_prefix(
 def test_injector_rejects_a_prefix_that_cannot_fit_the_digest():
     with pytest.raises(ValidationError):
         KubernetesSandboxServiceInjector(claim_name_prefix='p' * 58)
+
+
+async def test_unknown_spec_id_does_not_pause_existing_sandboxes(
+    service, mock_sandbox_spec_service, custom_objects
+):
+    """An unknown spec id is a hard error, so it must not evict anything first."""
+    mock_sandbox_spec_service.get_sandbox_spec.return_value = None
+
+    with pytest.raises(ValueError, match='not found'):
+        await service.start_sandbox(sandbox_spec_id='no-such-spec')
+
+    custom_objects.patch_namespaced_custom_object.assert_not_called()
+    custom_objects.create_namespaced_custom_object.assert_not_called()
