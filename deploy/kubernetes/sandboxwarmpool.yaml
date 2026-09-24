@@ -1,0 +1,17 @@
+# The pool the app server claims sandboxes from. Its name is the default sandbox
+# spec id (see kubernetes_sandbox_spec_service.py); define more pools to offer
+# users a choice of runtimes.
+#
+# Note: agent-sandbox cold starts any claim that carries spec.env, and the app
+# server always sets webhook and port variables on the claim, so pre-warmed
+# replicas are not used today no matter how inject_session_key is set. Keep this at
+# 0 until claims can adopt a warm pod and receive their configuration afterwards.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: openhands-pool
+  namespace: default
+spec:
+  replicas: 0
+  sandboxTemplateRef:
+    name: openhands-agent-server

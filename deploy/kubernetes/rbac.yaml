@@ -1,0 +1,34 @@
+# Permissions the app server needs to manage sandboxes in its namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openhands-app-server
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openhands-app-server
+  namespace: default
+rules:
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    # patch is required to suspend and resume a sandbox via spec.operatingMode
+    verbs: ["get", "list", "watch", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openhands-app-server
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: openhands-app-server
+subjects:
+  - kind: ServiceAccount
+    name: openhands-app-server
+    namespace: default

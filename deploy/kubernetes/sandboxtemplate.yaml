@@ -1,0 +1,89 @@
+# SandboxTemplate describing the pod each sandbox runs in.
+#
+# The image must match the agent server the app server is built against; see
+# `get_agent_server_image()` (AGENT_SERVER_IMAGE_REPOSITORY / AGENT_SERVER_IMAGE_TAG
+# override it). The readiness probe on /health makes the Sandbox report Ready only
+# once the agent server is actually accepting requests.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: openhands-agent-server
+  namespace: default
+spec:
+  # Required: the app server injects the per-sandbox session API key (and webhook
+  # and CORS settings) as environment variables on each SandboxClaim. Without this
+  # the controller rejects the injection and sandboxes come up unauthenticated.
+  envVarsInjectionPolicy: Allowed
+
+  # The controller-managed NetworkPolicy is restrictive in both directions: egress
+  # allows public ranges but blocks private ones, and ingress only admits the
+  # sandbox-router. The app server needs both, since sandboxes call back to it for
+  # webhooks and it dials the sandbox Service directly. Allow exactly that rather
+  # than dropping the policy:
+  #
+  # networkPolicy:
+  #   ingress:
+  #     # This app server, which connects to the agent server in the pod
+  #     - from:
+  #         - podSelector:
+  #             matchLabels: { app: openhands-app-server }
+  #       ports: [{ protocol: TCP, port: 8000 }]
+  #   egress:
+  #     # DNS
+  #     - to:
+  #         - namespaceSelector:
+  #             matchLabels: { kubernetes.io/metadata.name: kube-system }
+  #       ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+  #     # This app server (adjust the selector to your deployment)
+  #     - to:
+  #         - podSelector:
+  #             matchLabels: { app: openhands-app-server }
+  #       ports: [{ protocol: TCP, port: 3000 }]
+  #     # Hosted LLM APIs over HTTPS
+  #     - ports: [{ protocol: TCP, port: 443 }]
+  #
+  # Note that many local clusters (including kind's default CNI) do not enforce
+  # NetworkPolicy at all, so a missing rule only shows up on a cluster that does.
+
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+  podTemplate:
+    spec:
+      # runtimeClassName: gvisor   # uncomment for kernel-level isolation
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: agent-server
+          image: ghcr.io/openhands/agent-server:1.37.1-python
+          args: ["--host", "0.0.0.0", "--port", "8000"]
+          workingDir: /workspace
+          ports:
+            - containerPort: 8000
+              name: agent-server
+            - containerPort: 8001
+              name: vscode
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 3
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
