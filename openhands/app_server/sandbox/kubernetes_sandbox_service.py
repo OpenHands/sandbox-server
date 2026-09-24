@@ -101,7 +101,7 @@ class ExposedPort(BaseModel):
 
 
 def _default_exposed_ports() -> list[ExposedPort]:
-    return [
+    ports = [
         ExposedPort(
             name=AGENT_SERVER,
             description='The port on which the agent server runs within the pod',
@@ -113,6 +113,9 @@ def _default_exposed_ports() -> list[ExposedPort]:
             container_port=8001,
         ),
     ]
+    if os.getenv('OH_ENABLE_VSCODE', '0').lower() not in ('1', 'true'):
+        ports = [port for port in ports if port.name != VSCODE]
+    return ports
 
 
 @dataclass
