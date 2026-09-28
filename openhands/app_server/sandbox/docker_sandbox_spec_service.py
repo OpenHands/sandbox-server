@@ -38,7 +38,6 @@ def get_default_sandbox_specs():
             id=get_agent_server_image(),
             command=['--port', '8000'],
             initial_env={
-                'OPENVSCODE_SERVER_ROOT': '/openhands/.openvscode-server',
                 'OH_ENABLE_VNC': '0',
                 'LOG_JSON': 'true',
                 'OH_CONVERSATIONS_PATH': '/workspace/conversations',

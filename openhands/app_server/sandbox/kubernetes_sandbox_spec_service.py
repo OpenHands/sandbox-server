@@ -34,7 +34,6 @@ def get_default_sandbox_specs() -> list[SandboxSpecInfo]:
             # The template's container command applies; the claim only injects env.
             command=None,
             initial_env={
-                'OPENVSCODE_SERVER_ROOT': '/openhands/.openvscode-server',
                 'OH_ENABLE_VNC': '0',
                 'LOG_JSON': 'true',
                 'OH_CONVERSATIONS_PATH': '/workspace/conversations',

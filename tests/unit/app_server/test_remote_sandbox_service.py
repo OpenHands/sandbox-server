@@ -418,12 +418,12 @@ class TestSandboxInfoConversion:
         assert sandbox_info.sandbox_spec_id == 'test-image:latest'
         assert sandbox_info.status == SandboxStatus.RUNNING
         assert sandbox_info.session_api_key == 'test-session-key'
-        assert len(sandbox_info.exposed_urls) == 4
+        assert len(sandbox_info.exposed_urls) == 3
 
         # Check exposed URLs
         url_names = [url.name for url in sandbox_info.exposed_urls]
         assert AGENT_SERVER in url_names
-        assert VSCODE in url_names
+        assert VSCODE not in url_names
         assert WORKER_1 in url_names
         assert WORKER_2 in url_names
 

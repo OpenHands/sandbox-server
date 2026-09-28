@@ -169,13 +169,14 @@ class RemoteSandboxService(SandboxService):
                     exposed_urls.append(
                         ExposedUrl(name=AGENT_SERVER, url=url, port=AGENT_SERVER_PORT)
                     )
-                    vscode_url = (
-                        _build_service_url(url, 'vscode', runtime_id)
-                        + f'?tkn={session_api_key}&folder=%2Fworkspace%2Fproject'
-                    )
-                    exposed_urls.append(
-                        ExposedUrl(name=VSCODE, url=vscode_url, port=VSCODE_PORT)
-                    )
+                    if os.getenv('OH_ENABLE_VSCODE', '0').lower() in ('1', 'true'):
+                        vscode_url = (
+                            _build_service_url(url, 'vscode', runtime_id)
+                            + f'?tkn={session_api_key}&folder=%2Fworkspace%2Fproject'
+                        )
+                        exposed_urls.append(
+                            ExposedUrl(name=VSCODE, url=vscode_url, port=VSCODE_PORT)
+                        )
                     exposed_urls.append(
                         ExposedUrl(
                             name=WORKER_1,
