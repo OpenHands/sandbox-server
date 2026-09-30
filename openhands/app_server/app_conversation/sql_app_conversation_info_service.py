@@ -27,6 +27,7 @@ from uuid import UUID
 
 from fastapi import Request
 from sqlalchemy import (
+    BigInteger,
     ColumnElement,
     DateTime,
     Float,
@@ -153,17 +154,21 @@ class StoredConversationMetadata(Base):
         create_json_type_decorator(list[int])
     )
 
-    # Cost and token metrics
+    # Cost and token metrics.
+    # Token counters use BigInteger (64-bit): they accumulate across a
+    # conversation and long-running sessions can exceed the 32-bit Integer
+    # range (~2.1 billion), which would otherwise fail the DB write and 500
+    # the stats webhook.
     accumulated_cost: Mapped[float | None] = mapped_column(default=0.0)
-    prompt_tokens: Mapped[int | None] = mapped_column(default=0)
-    completion_tokens: Mapped[int | None] = mapped_column(default=0)
-    total_tokens: Mapped[int | None] = mapped_column(default=0)
+    prompt_tokens: Mapped[int | None] = mapped_column(BigInteger, default=0)
+    completion_tokens: Mapped[int | None] = mapped_column(BigInteger, default=0)
+    total_tokens: Mapped[int | None] = mapped_column(BigInteger, default=0)
     max_budget_per_task: Mapped[float | None] = mapped_column(nullable=True)
-    cache_read_tokens: Mapped[int | None] = mapped_column(default=0)
-    cache_write_tokens: Mapped[int | None] = mapped_column(default=0)
-    reasoning_tokens: Mapped[int | None] = mapped_column(default=0)
-    context_window: Mapped[int | None] = mapped_column(default=0)
-    per_turn_token: Mapped[int | None] = mapped_column(default=0)
+    cache_read_tokens: Mapped[int | None] = mapped_column(BigInteger, default=0)
+    cache_write_tokens: Mapped[int | None] = mapped_column(BigInteger, default=0)
+    reasoning_tokens: Mapped[int | None] = mapped_column(BigInteger, default=0)
+    context_window: Mapped[int | None] = mapped_column(BigInteger, default=0)
+    per_turn_token: Mapped[int | None] = mapped_column(BigInteger, default=0)
 
     # LLM model used for the conversation
     llm_model: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -722,6 +727,19 @@ class SQLAppConversationInfoService(AppConversationInfoService):
                 conversation_id,
                 stack_info=True,
             )
+            # Roll back so a failed flush (e.g. a value out of range) does not
+            # leave the reused session in a PendingRollbackError state. Without
+            # this, every subsequent statement on the session raises
+            # immediately, turning a single bad event into a sustained stream
+            # of 500s from the webhook endpoint that never self-heals.
+            try:
+                await self.db_session.rollback()
+            except Exception:
+                logger.exception(
+                    'Failed to roll back session after statistics error for '
+                    'conversation %s',
+                    conversation_id,
+                )
 
     async def update_execution_status(
         self,
