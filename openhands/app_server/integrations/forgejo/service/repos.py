@@ -16,6 +16,7 @@ class ForgejoReposMixin(ForgejoMixinBase):
         order: str,
         public: bool,
         app_mode: AppMode,
+        page: int = 1,
     ) -> list[Repository]:  # type: ignore[override]
         url = f'{self.BASE_URL}/repos/search'
         params = {
@@ -24,6 +25,7 @@ class ForgejoReposMixin(ForgejoMixinBase):
             'sort': sort,
             'order': order,
             'mode': 'source',
+            'page': page,
         }
 
         response, _ = await self._make_request(url, params)

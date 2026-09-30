@@ -265,6 +265,7 @@ class GitService(Protocol):
         order: str,
         public: bool,
         app_mode: AppMode,
+        page: int = 1,
     ) -> list[Repository]:
         """Search for public repositories"""
         ...

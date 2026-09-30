@@ -215,12 +215,14 @@ class GitHubReposMixin(GitHubMixinBase):
         order: str,
         public: bool,
         app_mode: AppMode,
+        page: int = 1,
     ) -> list[Repository]:
         url = f'{self.BASE_URL}/search/repositories'
         params = {
             'per_page': per_page,
             'sort': sort,
             'order': order,
+            'page': page,
         }
 
         if public:

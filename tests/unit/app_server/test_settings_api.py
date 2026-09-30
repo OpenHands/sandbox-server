@@ -6,6 +6,7 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from openhands.agent_server.mcp_router import MCPTestFailure, MCPTestSuccess
 from openhands.app_server.app import app
 from openhands.app_server.file_store.memory import InMemoryFileStore
 from openhands.app_server.integrations.provider import ProviderToken, ProviderType
@@ -143,6 +144,114 @@ def test_get_conversation_settings_schema_endpoint(test_client):
     field_keys = [f['key'] for f in verification_section['fields']]
     assert 'confirmation_mode' in field_keys
     assert 'security_analyzer' in field_keys
+
+
+def _store_preflight_mcp_server(
+    test_client: TestClient,
+    *,
+    secret: str = 'mcp-secret-sentinel',
+) -> None:
+    response = test_client.post(
+        '/api/v1/settings',
+        json={
+            'agent_settings_diff': {
+                'mcp_config': {
+                    'github': {
+                        'transport': 'http',
+                        'url': 'https://mcp.example.test/github',
+                        'auth': {'strategy': 'api_key', 'value': secret},
+                    }
+                }
+            }
+        },
+    )
+    assert response.status_code == 200
+
+
+def test_stored_mcp_preflight_probes_server_without_exposing_details(test_client):
+    secret = 'mcp-secret-sentinel'
+    _store_preflight_mcp_server(test_client, secret=secret)
+
+    def probe(request, cipher):
+        assert cipher is None
+        auth = request.resolved_server.auth
+        assert auth is not None
+        assert auth.value.get_secret_value() == secret
+        return MCPTestSuccess(tools=['provider-tool'])
+
+    with patch(
+        'openhands.app_server.settings.settings_router._probe_mcp_server',
+        side_effect=probe,
+    ) as probe_mock:
+        response = test_client.post(
+            '/api/v1/settings/mcp/github/test',
+            json={'timeout': 10},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {'ok': True}
+    assert secret not in response.text
+    assert 'provider-tool' not in response.text
+    probe_mock.assert_called_once()
+
+
+def test_stored_mcp_preflight_sanitizes_connection_failure(test_client):
+    secret = 'mcp-secret-sentinel'
+    provider_error = 'provider-internal-error-sentinel'
+    _store_preflight_mcp_server(test_client, secret=secret)
+
+    with patch(
+        'openhands.app_server.settings.settings_router._probe_mcp_server',
+        return_value=MCPTestFailure(
+            error=provider_error,
+            error_kind='connection',
+        ),
+    ):
+        response = test_client.post('/api/v1/settings/mcp/github/test', json={})
+
+    assert response.status_code == 200
+    assert response.json() == {'ok': False}
+    assert secret not in response.text
+    assert provider_error not in response.text
+
+
+def test_stored_mcp_preflight_rejects_missing_server(test_client):
+    missing = test_client.post('/api/v1/settings/mcp/missing/test', json={})
+
+    assert missing.status_code == 404
+    assert missing.json() == {'detail': 'MCP server was not found'}
+
+
+def test_stored_mcp_preflight_returns_sanitized_503_on_internal_failure(test_client):
+    secret = 'mcp-secret-sentinel'
+    internal_error = 'internal-stack-sentinel'
+    _store_preflight_mcp_server(test_client, secret=secret)
+
+    with patch(
+        'openhands.app_server.settings.settings_router._probe_mcp_server',
+        side_effect=RuntimeError(internal_error),
+    ):
+        response = test_client.post('/api/v1/settings/mcp/github/test', json={})
+
+    assert response.status_code == 503
+    assert response.json() == {'detail': 'MCP validation is temporarily unavailable'}
+    assert secret not in response.text
+    assert internal_error not in response.text
+
+
+@pytest.mark.parametrize(
+    ('path', 'body'),
+    [
+        ('bad%2Fname', {}),
+        ('github', {'timeout': 0}),
+        ('github', {'timeout': 31}),
+        ('github', {'timeout': 10, 'secret': 'must-not-be-accepted'}),
+    ],
+)
+def test_stored_mcp_preflight_rejects_unbounded_input(test_client, path, body):
+    response = test_client.post(f'/api/v1/settings/mcp/{path}/test', json=body)
+
+    assert response.status_code in {404, 422}
 
 
 @pytest.mark.asyncio
