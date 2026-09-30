@@ -92,11 +92,15 @@ def get_default_persistence_dir() -> Path:
 def get_default_web_url() -> str | None:
     """Get legacy web host parameter.
 
-    If present, we assume we are running under https.
+    Bare hosts keep the historical ``https://`` default (cloud). Values that
+    already include a scheme are passed through so self-hosted HTTP
+    deployments can set ``WEB_HOST=http://host.docker.internal:3000``.
     """
-    web_host = os.getenv('WEB_HOST')
+    web_host = (os.getenv('WEB_HOST') or '').strip()
     if not web_host:
         return None
+    if '://' in web_host:
+        return web_host.rstrip('/')
     return f'https://{web_host}'
 
 
