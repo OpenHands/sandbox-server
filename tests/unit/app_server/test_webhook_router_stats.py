@@ -797,6 +797,63 @@ class TestProcessStatsEvent:
             mock_logger.exception.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_process_stats_event_rolls_back_and_recovers_after_bad_write(
+        self,
+        service,
+        async_session,
+        v1_conversation_metadata,
+    ):
+        """A failed stats write must not poison the reused session.
+
+        An out-of-range token value makes the commit inside
+        ``update_conversation_statistics`` fail mid-flush, which leaves the
+        AsyncSession needing a rollback. ``process_stats_event`` swallows the
+        error, so without the rollback in its handler the next statement on the
+        same session raises ``PendingRollbackError`` -- turning one bad event
+        into a sustained stream of 500s that never self-heals. Assert the
+        session is usable again after the failed event.
+        """
+        conversation_id, _ = v1_conversation_metadata
+
+        # One past the signed 64-bit maximum, so the write fails on flush
+        # (SQLite raises OverflowError; PostgreSQL raises a DataError) -- the
+        # same session-poisoning failure class the rollback protects against.
+        overflow = 2**63
+        bad_event = ConversationStateUpdateEvent(
+            key='stats',
+            value=ConversationStats(
+                usage_to_metrics={
+                    'agent': Metrics(
+                        model_name='gpt-4',
+                        accumulated_cost=1.0,
+                        accumulated_token_usage=TokenUsage(
+                            prompt_tokens=overflow,
+                            completion_tokens=1,
+                        ),
+                    )
+                }
+            ),
+        )
+
+        # Must not raise: the handler swallows the error and rolls back.
+        await service.process_stats_event(bad_event, conversation_id)
+
+        # The reused session must still be usable. On the unpatched handler this
+        # read raises PendingRollbackError instead of returning the row.
+        recovered = await service.get_app_conversation_info(conversation_id)
+        assert recovered is not None
+        assert recovered.id == conversation_id
+
+        # The out-of-range write was rolled back, so the counter never advanced.
+        result = await async_session.execute(
+            select(StoredConversationMetadata).where(
+                StoredConversationMetadata.conversation_id == str(conversation_id)
+            )
+        )
+        stored = result.scalar_one()
+        assert stored.prompt_tokens == 0
+
+    @pytest.mark.asyncio
     async def test_process_stats_event_empty_usage_to_metrics(
         self, service, async_session, v1_conversation_metadata
     ):
