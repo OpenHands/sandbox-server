@@ -12,6 +12,7 @@ from uuid import uuid4
 import pytest
 from fastapi import BackgroundTasks
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -32,6 +33,39 @@ from openhands.app_server.utils.sql_utils import Base
 from openhands.sdk import ConversationStats
 from openhands.sdk.event import ConversationStateUpdateEvent
 from openhands.sdk.llm import Metrics, TokenUsage
+
+# Cumulative token counters that must be 64-bit to survive long conversations.
+_TOKEN_COUNTER_COLUMNS = [
+    'prompt_tokens',
+    'completion_tokens',
+    'total_tokens',
+    'cache_read_tokens',
+    'cache_write_tokens',
+    'reasoning_tokens',
+    'context_window',
+    'per_turn_token',
+]
+
+
+def test_conversation_metadata_token_columns_are_bigint():
+    """Token counters must map to 64-bit BIGINT on PostgreSQL.
+
+    These counters accumulate across a conversation and long-running sessions
+    exceed the 32-bit INTEGER range (~2.1 billion), which fails the DB write
+    and 500s the stats webhook. The unit-test backend is SQLite, whose
+    integers are dynamically sized, so it cannot catch a regression back to a
+    32-bit column. Assert the compiled PostgreSQL DDL type directly instead --
+    this is the production backend and the schema the migration targets.
+    """
+    pg_dialect = postgresql.dialect()
+    table = StoredConversationMetadata.__table__
+    for column_name in _TOKEN_COUNTER_COLUMNS:
+        compiled_type = table.c[column_name].type.compile(dialect=pg_dialect)
+        assert compiled_type == 'BIGINT', (
+            f'{column_name} compiles to {compiled_type!r}, expected BIGINT; a '
+            'regression to a 32-bit column reopens the token-overflow bug'
+        )
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
