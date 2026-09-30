@@ -888,6 +888,40 @@ class TestProcessStatsEvent:
         assert stored.prompt_tokens == 0
 
     @pytest.mark.asyncio
+    async def test_process_stats_event_swallows_rollback_failure(
+        self, service, stats_event_with_dict_value
+    ):
+        """If the recovery rollback itself fails, the handler must log and
+        return rather than propagate -- otherwise the error handler becomes a
+        second source of 500s. Guards the inner try/except around the rollback.
+        """
+        conversation_id = uuid4()
+
+        with (
+            patch.object(
+                service,
+                'update_conversation_statistics',
+                side_effect=Exception('write failed'),
+            ),
+            patch.object(
+                service.db_session,
+                'rollback',
+                side_effect=Exception('rollback failed'),
+            ),
+            patch(
+                'openhands.app_server.app_conversation.sql_app_conversation_info_service.logger'
+            ) as mock_logger,
+        ):
+            # Must not raise even though the rollback raises.
+            await service.process_stats_event(
+                stats_event_with_dict_value, conversation_id
+            )
+
+            # Both the original write failure and the rollback failure are
+            # logged rather than propagated.
+            assert mock_logger.exception.call_count == 2
+
+    @pytest.mark.asyncio
     async def test_process_stats_event_empty_usage_to_metrics(
         self, service, async_session, v1_conversation_metadata
     ):
