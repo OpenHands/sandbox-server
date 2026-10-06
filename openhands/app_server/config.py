@@ -101,7 +101,7 @@ def get_default_web_url() -> str | None:
         return None
     if '://' in web_host:
         return web_host.rstrip('/')
-    return f'https://{web_host}'
+    return f'https://{web_host.rstrip("/")}'
 
 
 def get_default_permitted_cors_origins() -> list[str]:

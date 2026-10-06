@@ -24,6 +24,10 @@ class TestGetDefaultWebUrl:
         monkeypatch.setenv('WEB_HOST', 'host.docker.internal:3000')
         assert get_default_web_url() == 'https://host.docker.internal:3000'
 
+    def test_trailing_slash_stripped_from_bare_host(self, monkeypatch):
+        monkeypatch.setenv('WEB_HOST', 'host.docker.internal:3000/')
+        assert get_default_web_url() == 'https://host.docker.internal:3000'
+
     def test_explicit_http_scheme_is_preserved(self, monkeypatch):
         monkeypatch.setenv('WEB_HOST', 'http://host.docker.internal:3000')
         assert get_default_web_url() == 'http://host.docker.internal:3000'
