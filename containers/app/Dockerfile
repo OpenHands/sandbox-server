@@ -1,5 +1,5 @@
 ARG OPENHANDS_BUILD_VERSION=dev
-FROM python:3.13.7-slim-trixie AS base
+FROM python:3.13.17-slim-trixie AS base
 
 FROM base AS backend-builder
 
@@ -26,7 +26,7 @@ FROM base AS openhands-sandbox-server
 WORKDIR /app
 
 ARG OPENHANDS_BUILD_VERSION
-ARG PIP_VERSION=26.0.1
+ARG PIP_VERSION=26.2.2
 
 ENV RUN_AS_OPENHANDS=true \
     OPENHANDS_USER_ID=42420 \
