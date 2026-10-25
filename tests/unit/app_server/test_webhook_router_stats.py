@@ -12,6 +12,7 @@ from uuid import uuid4
 import pytest
 from fastapi import BackgroundTasks
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -32,6 +33,39 @@ from openhands.app_server.utils.sql_utils import Base
 from openhands.sdk import ConversationStats
 from openhands.sdk.event import ConversationStateUpdateEvent
 from openhands.sdk.llm import Metrics, TokenUsage
+
+# Cumulative token counters that must be 64-bit to survive long conversations.
+_TOKEN_COUNTER_COLUMNS = [
+    'prompt_tokens',
+    'completion_tokens',
+    'total_tokens',
+    'cache_read_tokens',
+    'cache_write_tokens',
+    'reasoning_tokens',
+    'context_window',
+    'per_turn_token',
+]
+
+
+def test_conversation_metadata_token_columns_are_bigint():
+    """Token counters must map to 64-bit BIGINT on PostgreSQL.
+
+    These counters accumulate across a conversation and long-running sessions
+    exceed the 32-bit INTEGER range (~2.1 billion), which fails the DB write
+    and 500s the stats webhook. The unit-test backend is SQLite, whose
+    integers are dynamically sized, so it cannot catch a regression back to a
+    32-bit column. Assert the compiled PostgreSQL DDL type directly instead --
+    this is the production backend and the schema the migration targets.
+    """
+    pg_dialect = postgresql.dialect()
+    table = StoredConversationMetadata.__table__
+    for column_name in _TOKEN_COUNTER_COLUMNS:
+        compiled_type = table.c[column_name].type.compile(dialect=pg_dialect)
+        assert compiled_type == 'BIGINT', (
+            f'{column_name} compiles to {compiled_type!r}, expected BIGINT; a '
+            'regression to a 32-bit column reopens the token-overflow bug'
+        )
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -795,6 +829,97 @@ class TestProcessStatsEvent:
 
             # Verify error was logged
             mock_logger.exception.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_process_stats_event_rolls_back_and_recovers_after_bad_write(
+        self,
+        service,
+        async_session,
+        v1_conversation_metadata,
+    ):
+        """A failed stats write must not poison the reused session.
+
+        An out-of-range token value makes the commit inside
+        ``update_conversation_statistics`` fail mid-flush, which leaves the
+        AsyncSession needing a rollback. ``process_stats_event`` swallows the
+        error, so without the rollback in its handler the next statement on the
+        same session raises ``PendingRollbackError`` -- turning one bad event
+        into a sustained stream of 500s that never self-heals. Assert the
+        session is usable again after the failed event.
+        """
+        conversation_id, _ = v1_conversation_metadata
+
+        # One past the signed 64-bit maximum, so the write fails on flush
+        # (SQLite raises OverflowError; PostgreSQL raises a DataError) -- the
+        # same session-poisoning failure class the rollback protects against.
+        overflow = 2**63
+        bad_event = ConversationStateUpdateEvent(
+            key='stats',
+            value=ConversationStats(
+                usage_to_metrics={
+                    'agent': Metrics(
+                        model_name='gpt-4',
+                        accumulated_cost=1.0,
+                        accumulated_token_usage=TokenUsage(
+                            prompt_tokens=overflow,
+                            completion_tokens=1,
+                        ),
+                    )
+                }
+            ),
+        )
+
+        # Must not raise: the handler swallows the error and rolls back.
+        await service.process_stats_event(bad_event, conversation_id)
+
+        # The reused session must still be usable. On the unpatched handler this
+        # read raises PendingRollbackError instead of returning the row.
+        recovered = await service.get_app_conversation_info(conversation_id)
+        assert recovered is not None
+        assert recovered.id == conversation_id
+
+        # The out-of-range write was rolled back, so the counter never advanced.
+        result = await async_session.execute(
+            select(StoredConversationMetadata).where(
+                StoredConversationMetadata.conversation_id == str(conversation_id)
+            )
+        )
+        stored = result.scalar_one()
+        assert stored.prompt_tokens == 0
+
+    @pytest.mark.asyncio
+    async def test_process_stats_event_swallows_rollback_failure(
+        self, service, stats_event_with_dict_value
+    ):
+        """If the recovery rollback itself fails, the handler must log and
+        return rather than propagate -- otherwise the error handler becomes a
+        second source of 500s. Guards the inner try/except around the rollback.
+        """
+        conversation_id = uuid4()
+
+        with (
+            patch.object(
+                service,
+                'update_conversation_statistics',
+                side_effect=Exception('write failed'),
+            ),
+            patch.object(
+                service.db_session,
+                'rollback',
+                side_effect=Exception('rollback failed'),
+            ),
+            patch(
+                'openhands.app_server.app_conversation.sql_app_conversation_info_service.logger'
+            ) as mock_logger,
+        ):
+            # Must not raise even though the rollback raises.
+            await service.process_stats_event(
+                stats_event_with_dict_value, conversation_id
+            )
+
+            # Both the original write failure and the rollback failure are
+            # logged rather than propagated.
+            assert mock_logger.exception.call_count == 2
 
     @pytest.mark.asyncio
     async def test_process_stats_event_empty_usage_to_metrics(
