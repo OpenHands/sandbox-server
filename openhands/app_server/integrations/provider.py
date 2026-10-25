@@ -368,12 +368,13 @@ class ProviderHandler:
         sort: str,
         order: str,
         app_mode: AppMode,
+        page: int = 1,
     ) -> list[Repository]:
         if selected_provider:
             service = self.get_service(selected_provider)
             public = self._is_repository_url(query, selected_provider)
             user_repos = await service.search_repositories(
-                query, per_page, sort, order, public, app_mode
+                query, per_page, sort, order, public, app_mode, page
             )
             return self._deduplicate_repositories(user_repos)
 
@@ -383,7 +384,7 @@ class ProviderHandler:
                 service = self.get_service(provider)
                 public = self._is_repository_url(query, provider)
                 service_repos = await service.search_repositories(
-                    query, per_page, sort, order, public, app_mode
+                    query, per_page, sort, order, public, app_mode, page
                 )
                 all_repos.extend(service_repos)
             except Exception as e:
@@ -470,6 +471,7 @@ class ProviderHandler:
         specified_provider: ProviderType | None = None,
         page: int = 1,
         per_page: int = 30,
+        raise_on_error: bool = False,
     ) -> PaginatedBranchesResponse:
         """Get branches for a repository
 
@@ -487,6 +489,9 @@ class ProviderHandler:
                 service = self.get_service(specified_provider)
                 return await service.get_paginated_branches(repository, page, per_page)
             except Exception as e:
+                if raise_on_error:
+                    logger.warning(f'Error fetching branches from {specified_provider}')
+                    raise
                 logger.warning(
                     f'Error fetching branches from {specified_provider}: {e}'
                 )
