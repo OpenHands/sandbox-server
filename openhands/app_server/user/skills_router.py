@@ -308,7 +308,10 @@ async def _clone_marketplace_repo(
 
         # Navigate to repo_path if specified
         if marketplace.repo_path:
-            skills_path = clone_dir / marketplace.repo_path
+            skills_path = (clone_dir / marketplace.repo_path).resolve()
+            if not skills_path.is_relative_to(clone_dir.resolve()):
+                _cleanup_clone_dir(clone_dir)
+                return None, f'Invalid repo path: {marketplace.repo_path}'
             if not skills_path.exists():
                 _cleanup_clone_dir(clone_dir)
                 return None, f'Repo path not found: {marketplace.repo_path}'
