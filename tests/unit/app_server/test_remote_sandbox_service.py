@@ -21,6 +21,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openhands.app_server.errors import SandboxDeleteRetryError, SandboxError
@@ -30,6 +31,7 @@ from openhands.app_server.sandbox.remote_sandbox_service import (
     WEBHOOK_CALLBACK_VARIABLE,
     RemoteSandboxService,
     StoredRemoteSandbox,
+    _hash_session_api_key,
 )
 from openhands.app_server.sandbox.sandbox_models import (
     AGENT_SERVER,
@@ -80,8 +82,21 @@ def mock_db_session():
 
 
 @pytest.fixture
+def mock_async_session_maker(mock_db_session):
+    """Create isolated-read contexts backed by the test's DB session mock."""
+    context = AsyncMock()
+    context.__aenter__.return_value = mock_db_session
+    context.__aexit__.return_value = False
+    return MagicMock(return_value=context)
+
+
+@pytest.fixture
 def remote_sandbox_service(
-    mock_sandbox_spec_service, mock_user_context, mock_httpx_client, mock_db_session
+    mock_sandbox_spec_service,
+    mock_user_context,
+    mock_httpx_client,
+    mock_db_session,
+    mock_async_session_maker,
 ):
     """Create RemoteSandboxService instance with mocked dependencies."""
     return RemoteSandboxService(
@@ -96,6 +111,7 @@ def remote_sandbox_service(
         user_context=mock_user_context,
         httpx_client=mock_httpx_client,
         db_session=mock_db_session,
+        async_session_maker=mock_async_session_maker,
     )
 
 
@@ -1084,7 +1100,7 @@ class TestSandboxSearch:
         """Test getting an existing sandbox."""
         # Setup
         stored_sandbox = create_stored_sandbox()
-        remote_sandbox_service._get_stored_sandbox = AsyncMock(
+        remote_sandbox_service._get_stored_sandbox_for_read = AsyncMock(
             return_value=stored_sandbox
         )
         remote_sandbox_service._to_sandbox_info = MagicMock(
@@ -1104,7 +1120,7 @@ class TestSandboxSearch:
         # Verify
         assert result is not None
         assert result.id == 'test-sandbox-123'
-        remote_sandbox_service._get_stored_sandbox.assert_called_once_with(
+        remote_sandbox_service._get_stored_sandbox_for_read.assert_called_once_with(
             'test-sandbox-123'
         )
 
@@ -1112,7 +1128,9 @@ class TestSandboxSearch:
     async def test_get_sandbox_not_exists(self, remote_sandbox_service):
         """Test getting a non-existent sandbox."""
         # Setup
-        remote_sandbox_service._get_stored_sandbox = AsyncMock(return_value=None)
+        remote_sandbox_service._get_stored_sandbox_for_read = AsyncMock(
+            return_value=None
+        )
 
         # Execute
         result = await remote_sandbox_service.get_sandbox('non-existent')
@@ -1857,12 +1875,9 @@ class TestBatchGetSandboxes:
         stored_sandbox_2 = create_stored_sandbox(sandbox_id='sandbox-2')
         runtime_1 = create_runtime_data(session_id='sandbox-1', status='running')
 
-        # Mock DB query result
-        mock_result = MagicMock()
-        mock_result.__iter__ = MagicMock(
-            return_value=iter([(stored_sandbox_1,), (stored_sandbox_2,)])
+        remote_sandbox_service._isolated_read_all = AsyncMock(
+            return_value=[stored_sandbox_1, stored_sandbox_2]
         )
-        remote_sandbox_service.db_session.execute = AsyncMock(return_value=mock_result)
 
         # Mock successful runtime batch response
         remote_sandbox_service._get_runtimes_batch = AsyncMock(
@@ -1906,12 +1921,9 @@ class TestBatchGetSandboxes:
         stored_sandbox_1 = create_stored_sandbox(sandbox_id='sandbox-1')
         stored_sandbox_2 = create_stored_sandbox(sandbox_id='sandbox-2')
 
-        # Mock DB query result
-        mock_result = MagicMock()
-        mock_result.__iter__ = MagicMock(
-            return_value=iter([(stored_sandbox_1,), (stored_sandbox_2,)])
+        remote_sandbox_service._isolated_read_all = AsyncMock(
+            return_value=[stored_sandbox_1, stored_sandbox_2]
         )
-        remote_sandbox_service.db_session.execute = AsyncMock(return_value=mock_result)
 
         # Mock runtime API timeout
         remote_sandbox_service._get_runtimes_batch = AsyncMock(
@@ -1944,10 +1956,9 @@ class TestBatchGetSandboxes:
         sandbox_ids = ['sandbox-1']
         stored_sandbox_1 = create_stored_sandbox(sandbox_id='sandbox-1')
 
-        # Mock DB query result
-        mock_result = MagicMock()
-        mock_result.__iter__ = MagicMock(return_value=iter([(stored_sandbox_1,)]))
-        remote_sandbox_service.db_session.execute = AsyncMock(return_value=mock_result)
+        remote_sandbox_service._isolated_read_all = AsyncMock(
+            return_value=[stored_sandbox_1]
+        )
 
         # Mock runtime API HTTP error
         remote_sandbox_service._get_runtimes_batch = AsyncMock(
@@ -1977,10 +1988,9 @@ class TestBatchGetSandboxes:
         sandbox_ids = ['sandbox-1']
         stored_sandbox_1 = create_stored_sandbox(sandbox_id='sandbox-1')
 
-        # Mock DB query result
-        mock_result = MagicMock()
-        mock_result.__iter__ = MagicMock(return_value=iter([(stored_sandbox_1,)]))
-        remote_sandbox_service.db_session.execute = AsyncMock(return_value=mock_result)
+        remote_sandbox_service._isolated_read_all = AsyncMock(
+            return_value=[stored_sandbox_1]
+        )
 
         # Mock HTTP status error from raise_for_status()
         remote_sandbox_service._get_runtimes_batch = AsyncMock(
@@ -2669,6 +2679,93 @@ class TestArchiveWorkspaceHelper:
         assert any('/shared-sandbox/convb/' in p for p in patch_blobs)
 
 
+class TestIsolatedSandboxReads:
+    """Pure reads must not commit sibling writes on the request session."""
+
+    @pytest.fixture
+    async def service_and_sessions(
+        self, tmp_path, mock_sandbox_spec_service, mock_user_context
+    ):
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from openhands.app_server.utils.sql_utils import Base
+
+        engine = create_async_engine(f'sqlite+aiosqlite:///{tmp_path / "reads.db"}')
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with maker() as shared_session:
+            service = RemoteSandboxService(
+                sandbox_spec_service=mock_sandbox_spec_service,
+                api_url='https://api.example.com',
+                api_key='test-api-key',
+                web_url='https://web.example.com',
+                resource_factor=1,
+                runtime_class='gvisor',
+                start_sandbox_timeout=120,
+                max_num_sandboxes=10,
+                user_context=mock_user_context,
+                httpx_client=AsyncMock(spec=httpx.AsyncClient),
+                db_session=shared_session,
+                async_session_maker=maker,
+            )
+            yield service, shared_session, maker
+        await engine.dispose()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'read_path',
+        [
+            'get_sandbox',
+            'search_sandboxes',
+            'get_sandbox_by_session_api_key',
+            'batch_get_sandboxes',
+            'get_user_running_sandboxes',
+        ],
+    )
+    async def test_read_path_does_not_commit_shared_session(
+        self, service_and_sessions, read_path
+    ):
+        service, shared_session, maker = service_and_sessions
+        session_key = 'session-key'
+
+        committed = create_stored_sandbox(
+            sandbox_id='committed',
+            session_api_key_hash=_hash_session_api_key(session_key),
+        )
+        async with maker() as seed_session:
+            seed_session.add(committed)
+            await seed_session.commit()
+
+        pending = create_stored_sandbox(sandbox_id='pending-sibling-write')
+        shared_session.add(pending)
+
+        service._get_runtime = AsyncMock(return_value=None)
+        service._get_runtimes_batch = AsyncMock(return_value={})
+        list_response = MagicMock()
+        list_response.raise_for_status.return_value = None
+        list_response.json.return_value = {'runtimes': [{'session_id': committed.id}]}
+        service._send_runtime_api_request = AsyncMock(return_value=list_response)
+
+        if read_path == 'get_sandbox':
+            await service.get_sandbox(committed.id)
+        elif read_path == 'search_sandboxes':
+            await service.search_sandboxes()
+        elif read_path == 'get_sandbox_by_session_api_key':
+            await service.get_sandbox_by_session_api_key(session_key)
+        elif read_path == 'batch_get_sandboxes':
+            await service.batch_get_sandboxes([committed.id])
+        else:
+            await service._get_user_running_sandboxes()
+
+        assert pending in shared_session.new
+        async with maker() as verification_session:
+            result = await verification_session.execute(
+                select(StoredRemoteSandbox).where(StoredRemoteSandbox.id == pending.id)
+            )
+            assert result.scalar_one_or_none() is None
+
+
 class TestDeleteSandboxKeyHandling:
     """The session_api_key_hash is invalidated UP FRONT on delete (a delete is
     often a revoke of a leaked key). When a transient error keeps the row for
@@ -2706,8 +2803,14 @@ class TestDeleteSandboxKeyHandling:
 
     @pytest.fixture
     def service_with_real_db(
-        self, mock_sandbox_spec_service, mock_user_context, real_session
+        self,
+        mock_sandbox_spec_service,
+        mock_user_context,
+        real_session,
+        async_engine,
     ):
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
         return RemoteSandboxService(
             sandbox_spec_service=mock_sandbox_spec_service,
             api_url='https://api.example.com',
@@ -2720,6 +2823,9 @@ class TestDeleteSandboxKeyHandling:
             user_context=mock_user_context,
             httpx_client=AsyncMock(spec=httpx.AsyncClient),
             db_session=real_session,
+            async_session_maker=async_sessionmaker(
+                async_engine, class_=AsyncSession, expire_on_commit=False
+            ),
         )
 
     @pytest.mark.asyncio
