@@ -1505,3 +1505,54 @@ class TestLoadSkillsAndUpdateAgent:
                 'registered_marketplaces'
             ]
             assert forwarded == marketplaces
+
+
+class TestOptionalConversationScripts:
+    """Optional conversation scripts should not cause bootstrap failures."""
+
+    @pytest.mark.asyncio
+    async def test_missing_setup_script_is_checked_before_chmod_and_source(self):
+        mock_user_context = Mock(spec=UserContext)
+        with patch.object(AppConversationServiceBase, '__abstractmethods__', set()):
+            service = AppConversationServiceBase(
+                init_git_in_empty_workspace=True, user_context=mock_user_context
+            )
+
+        workspace = AsyncMock()
+        await service.maybe_run_setup_script(workspace, '/workspace/project')
+
+        command = workspace.execute_command.call_args.args[0]
+        assert command == (
+            'if [ -f /workspace/project/.openhands/setup.sh ]; then '
+            'chmod +x /workspace/project/.openhands/setup.sh && '
+            'source /workspace/project/.openhands/setup.sh; fi'
+        )
+        workspace.execute_command.assert_awaited_once_with(
+            command, cwd='/workspace/project', timeout=600
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_pre_commit_script_does_not_install_hook(self):
+        mock_user_context = Mock(spec=UserContext)
+        with patch.object(AppConversationServiceBase, '__abstractmethods__', set()):
+            service = AppConversationServiceBase(
+                init_git_in_empty_workspace=True, user_context=mock_user_context
+            )
+
+        workspace = AsyncMock()
+        workspace.execute_command.return_value = Mock(
+            exit_code=0, stdout='__openhands_pre_commit_script_missing__'
+        )
+        await service.maybe_setup_git_hooks(workspace, '/workspace/project')
+
+        command = workspace.execute_command.call_args.args[0]
+        assert command == (
+            'if [ -f .openhands/pre-commit.sh ]; then '
+            'mkdir -p .git/hooks && chmod +x .openhands/pre-commit.sh; '
+            'else printf __openhands_pre_commit_script_missing__; fi'
+        )
+        workspace.execute_command.assert_awaited_once_with(
+            command, '/workspace/project'
+        )
+        workspace.file_download.assert_not_awaited()
+        workspace.file_upload.assert_not_awaited()

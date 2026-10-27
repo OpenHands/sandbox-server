@@ -546,10 +546,13 @@ printf 'password=%s\\n' "$token"
             workspace: Remote workspace for command execution.
             project_dir: Project root directory (repo root when a repo is selected).
         """
-        setup_script = project_dir + '/.openhands/setup.sh'
+
+        setup_script = shlex.quote(f'{project_dir}/.openhands/setup.sh')
 
         await workspace.execute_command(
-            f'chmod +x {setup_script} && source {setup_script}',
+            f'if [ -f {setup_script} ]; then '
+            f'chmod +x {setup_script} && source {setup_script}; '
+            'fi',
             cwd=project_dir,
             timeout=600,
         )
@@ -565,11 +568,18 @@ printf 'password=%s\\n' "$token"
             workspace: Remote workspace for command execution.
             project_dir: Project root directory (repo root when a repo is selected).
         """
-        command = 'mkdir -p .git/hooks && chmod +x .openhands/pre-commit.sh'
+        missing_script_marker = '__openhands_pre_commit_script_missing__'
+        command = (
+            'if [ -f .openhands/pre-commit.sh ]; then '
+            'mkdir -p .git/hooks && chmod +x .openhands/pre-commit.sh; '
+            f'else printf {missing_script_marker}; fi'
+        )
         pre_commit_command_result = await workspace.execute_command(
             command, project_dir
         )
         if pre_commit_command_result.exit_code:
+            return
+        if pre_commit_command_result.stdout.strip() == missing_script_marker:
             return
 
         # Check if there's an existing pre-commit hook
