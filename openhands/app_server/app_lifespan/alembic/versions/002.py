@@ -28,14 +28,12 @@ class EventCallbackStatus(Enum):
 
 def upgrade() -> None:
     """Upgrade schema."""
+    # Must match the name StoredEventCallback.status derives from its enum class.
+    status = sa.Enum(EventCallbackStatus, name='eventcallbackstatus')
+    status.create(op.get_bind(), checkfirst=True)
     op.add_column(
         'event_callback',
-        sa.Column(
-            'status',
-            sa.Enum(EventCallbackStatus),
-            nullable=False,
-            server_default='ACTIVE',
-        ),
+        sa.Column('status', status, nullable=False, server_default='ACTIVE'),
     )
     op.add_column(
         'event_callback',
@@ -70,4 +68,7 @@ def downgrade() -> None:
         'event_callback_result',
         ['event_id'],
         unique=False,
+    )
+    sa.Enum(EventCallbackStatus, name='eventcallbackstatus').drop(
+        op.get_bind(), checkfirst=True
     )
